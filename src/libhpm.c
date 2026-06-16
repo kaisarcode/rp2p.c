@@ -543,6 +543,10 @@ typedef struct {
     char pass[KC_HPM_PASS_MAX + 1];
 } kc_hpm_vip_entry_t;
 
+/**
+ * Pending punch.
+ * Summary: Tracks a two-round punch request awaiting ACK2 from publisher.
+ */
 typedef struct {
     char self_id[KC_HPM_ID_MAX + 1];
     char target_id[KC_HPM_ID_MAX + 1];
@@ -3124,6 +3128,10 @@ static void kc_hpm_conn_remove(kc_hpm_t *ctx, int idx) {
     ctx->n_conns--;
 }
 
+/**
+ * Pending punch find.
+ * @return index on success, -1 on error.
+ */
 static int kc_hpm_pending_punch_find(kc_hpm_t *ctx, const char *target_id, const char *self_id, const char *sess_id) {
     for (int i = 0; i < ctx->n_pending_punches; i++) {
         if (strcmp(ctx->pending_punches[i].target_id, target_id) == 0 &&
@@ -3134,11 +3142,19 @@ static int kc_hpm_pending_punch_find(kc_hpm_t *ctx, const char *target_id, const
     return -1;
 }
 
+/**
+ * Pending punch remove.
+ * @return None.
+ */
 static void kc_hpm_pending_punch_remove(kc_hpm_t *ctx, int idx) {
     if (idx >= 0 && idx < ctx->n_pending_punches)
         ctx->pending_punches[idx] = ctx->pending_punches[--ctx->n_pending_punches];
 }
 
+/**
+ * Pending punch evict stale.
+ * @return None.
+ */
 static void kc_hpm_pending_punch_evict_stale(kc_hpm_t *ctx) {
     time_t now = time(NULL);
     for (int i = 0; i < ctx->n_pending_punches; i++) {

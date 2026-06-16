@@ -75,7 +75,8 @@ typedef int kc_hpm_fd_t;
 #define KC_HPM_KEEPALIVE_S       3
 #define KC_HPM_PUNCH_ATTEMPTS   10
 #define KC_HPM_PUNCH_INTERVAL_MS 200
-#define KC_HPM_CANDIDATES_MAX   16
+#define KC_HPM_CANDIDATES_MAX       16
+#define KC_HPM_MAX_PENDING_PUNCHES  32
 #define KC_HPM_POW_CHALLENGES_MAX 256
 #define KC_HPM_STREAM_MAGIC      0x48535452u
 #define KC_HPM_STREAM_VERSION    1u
@@ -542,6 +543,14 @@ typedef struct {
     char pass[KC_HPM_PASS_MAX + 1];
 } kc_hpm_vip_entry_t;
 
+typedef struct {
+    char self_id[KC_HPM_ID_MAX + 1];
+    char target_id[KC_HPM_ID_MAX + 1];
+    char sess_id[64];
+    kc_hpm_fd_t consumer_fd;
+    time_t ts;
+} kc_hpm_pending_punch_t;
+
 struct kc_hpm {
     kc_hpm_signal_entry_t *signal_entries;
     int signal_count;
@@ -569,6 +578,8 @@ struct kc_hpm {
     pthread_mutex_t mutex;
 #endif
     char stun_url[512];
+    kc_hpm_pending_punch_t pending_punches[KC_HPM_MAX_PENDING_PUNCHES];
+    int n_pending_punches;
 };
 
 typedef struct kc_hpm_udp_consumer_session {
@@ -3098,12 +3109,44 @@ static int kc_hpm_conn_add(kc_hpm_t *ctx, int fd) {
  */
 static void kc_hpm_conn_remove(kc_hpm_t *ctx, int idx) {
     if (idx < 0 || idx >= ctx->n_conns) return;
-    KC_HPM_FD_CLOSE(ctx->conns[idx].fd);
+    kc_hpm_fd_t fd = ctx->conns[idx].fd;
+    KC_HPM_FD_CLOSE(fd);
+    for (int pi = 0; pi < ctx->n_pending_punches; pi++) {
+        if (ctx->pending_punches[pi].consumer_fd == fd) {
+            ctx->pending_punches[pi] = ctx->pending_punches[--ctx->n_pending_punches];
+            pi--;
+        }
+    }
     if (idx < ctx->n_conns - 1) {
         memmove(&ctx->conns[idx], &ctx->conns[idx + 1],
             (size_t)(ctx->n_conns - idx - 1) * sizeof(ctx->conns[0]));
     }
     ctx->n_conns--;
+}
+
+static int kc_hpm_pending_punch_find(kc_hpm_t *ctx, const char *target_id, const char *self_id, const char *sess_id) {
+    for (int i = 0; i < ctx->n_pending_punches; i++) {
+        if (strcmp(ctx->pending_punches[i].target_id, target_id) == 0 &&
+            strcmp(ctx->pending_punches[i].self_id, self_id) == 0 &&
+            strcmp(ctx->pending_punches[i].sess_id, sess_id) == 0)
+            return i;
+    }
+    return -1;
+}
+
+static void kc_hpm_pending_punch_remove(kc_hpm_t *ctx, int idx) {
+    if (idx >= 0 && idx < ctx->n_pending_punches)
+        ctx->pending_punches[idx] = ctx->pending_punches[--ctx->n_pending_punches];
+}
+
+static void kc_hpm_pending_punch_evict_stale(kc_hpm_t *ctx) {
+    time_t now = time(NULL);
+    for (int i = 0; i < ctx->n_pending_punches; i++) {
+        if (now - ctx->pending_punches[i].ts > 30) {
+            ctx->pending_punches[i] = ctx->pending_punches[--ctx->n_pending_punches];
+            i--;
+        }
+    }
 }
 
 /**
@@ -3431,6 +3474,7 @@ int kc_hpm_punch_select(kc_hpm_t *ctx, int sweep_limit, int udp_fd, const char *
     char ping_msg[256];
     snprintf(ping_msg, sizeof(ping_msg), "PUNCH_PING:%s:%s:%s\n", session_id, from_id, to_id);
     
+    fprintf(stderr, "hpm: punch_select %s->%s %d cands\n", from_id, to_id, remote_candidate_count);
     for (int i = 0; i < 3; i++) { 
         for (int c = 0; c < remote_candidate_count; c++) {
             struct sockaddr_in cand_sa;
@@ -3439,6 +3483,8 @@ int kc_hpm_punch_select(kc_hpm_t *ctx, int sweep_limit, int udp_fd, const char *
             cand_sa.sin_addr.s_addr = inet_addr(remote_candidates[c].addr);
             cand_sa.sin_port = htons(remote_candidates[c].port);
             sendto(udp_fd, ping_msg, strlen(ping_msg), 0, (struct sockaddr *)&cand_sa, sizeof(cand_sa));
+            if (i == 0)
+                fprintf(stderr, "hpm: PING -> %s:%u\n", remote_candidates[c].addr, (unsigned)remote_candidates[c].port);
         }
         
         fd_set readfds;
@@ -3865,13 +3911,53 @@ int kc_hpm_serve_index(
                                     strncat(msg, "END\n", sizeof(msg) - strlen(msg) - 1);
                                     kc_hpm_tcp_send(target_fd, msg);
                                     
-                                    snprintf(msg, sizeof(msg), "PUNCH_OK2:%s:%s\nCAND:host:%s:%u\nEND\n", target_id, sess_id,
-                                        ctx->peers[srv_idx].addr, (unsigned)ctx->peers[srv_idx].port);
-                                    kc_hpm_tcp_send(c->fd, msg);
+                                    kc_hpm_pending_punch_evict_stale(ctx);
+                                    if (ctx->n_pending_punches < KC_HPM_MAX_PENDING_PUNCHES) {
+                                        fprintf(stderr, "hpm: REQ2 %s -> %s (sess %.16s) saved\n", self_id, target_id, sess_id);
+                                        kc_hpm_pending_punch_t *pp = &ctx->pending_punches[ctx->n_pending_punches++];
+                                        snprintf(pp->self_id, sizeof(pp->self_id), "%s", self_id);
+                                        snprintf(pp->target_id, sizeof(pp->target_id), "%s", target_id);
+                                        snprintf(pp->sess_id, sizeof(pp->sess_id), "%s", sess_id);
+                                        pp->consumer_fd = c->fd;
+                                        pp->ts = time(NULL);
+                                    } else {
+                                        kc_hpm_tcp_send(c->fd, "ERROR:busy");
+                                    }
                                 } else {
                                     kc_hpm_tcp_send(c->fd, "ERROR:offline");
                                 }
                             }
+                            
+                        } else if (strcmp(cmd, "PUNCH_ACK2") == 0) {
+                            char ack_self_id[KC_HPM_ID_MAX + 1] = {0};
+                            char ack_target_id[KC_HPM_ID_MAX + 1] = {0};
+                            char ack_sess_id[64] = {0};
+                            if (sscanf(cmd_buf, "PUNCH_ACK2:%63[^:]:%63[^:]:%63s", ack_self_id, ack_target_id, ack_sess_id) >= 3) {
+                                char *nl = strchr(ack_sess_id, '\n'); if (nl) *nl = '\0';
+                                int pp_idx = kc_hpm_pending_punch_find(ctx, ack_self_id, ack_target_id, ack_sess_id);
+                                if (pp_idx >= 0) {
+                                    char ok2[KC_HPM_BUF];
+                                    snprintf(ok2, sizeof(ok2), "PUNCH_OK2:%s:%s\n", ack_self_id, ack_sess_id);
+                                    while ((newline = (char *)memchr(line_start, '\n', (size_t)(c->buf + c->buf_len - line_start))) != NULL) {
+                                        int llen = (int)(newline - line_start);
+                                        char lbuf[128];
+                                        if (llen > 127) llen = 127;
+                                        memcpy(lbuf, line_start, llen);
+                                        lbuf[llen] = '\0';
+                                        line_start += llen + 1;
+                                        if (strcmp(lbuf, "END") == 0) break;
+                                        if (strncmp(lbuf, "CAND:", 5) == 0) {
+                                            strncat(ok2, lbuf, sizeof(ok2) - strlen(ok2) - 1);
+                                            strncat(ok2, "\n", sizeof(ok2) - strlen(ok2) - 1);
+                                        }
+                                    }
+                                    strncat(ok2, "END\n", sizeof(ok2) - strlen(ok2) - 1);
+                                    fprintf(stderr, "hpm: ACK2 %s -> %s (sess %.16s) -> OK2 to consumer\n", ack_self_id, ack_target_id, ack_sess_id);
+                                    kc_hpm_tcp_send(ctx->pending_punches[pp_idx].consumer_fd, ok2);
+                                    kc_hpm_pending_punch_remove(ctx, pp_idx);
+                                }
+                            }
+                            
                         } else if (strcmp(cmd, "DEREGISTER") == 0) {
                             char dkey[KC_HPM_KEY_STR_SZ];
                             if (sscanf(cmd_buf, "DEREGISTER:%63[^:]:KEY:%32[^\n]",
@@ -4330,6 +4416,8 @@ int kc_hpm_wait(
                     if (sscanf(recv_buf, "PUNCH_CALL2:%63[^:]:%47s", conn_id, conn_addr) == 2 || 
                         sscanf(recv_buf, "PUNCH_CALL:%63[^:]:%47[^:]:%u", conn_id, conn_addr, &conn_port) == 3)
                     {
+                        if (strncmp(recv_buf, "PUNCH_CALL2:", 12) == 0)
+                            fprintf(stderr, "hpm: CALL2 from %s (sess %.16s)\n", conn_id, conn_addr);
 
                         if (ctx->proto == KC_HPM_PROTO_TCP &&
                             strncmp(recv_buf, "PUNCH_CALL2:", 12) == 0) {
@@ -4351,6 +4439,30 @@ int kc_hpm_wait(
                         kc_hpm_candidate_t remote_cands[KC_HPM_CANDIDATES_MAX];
                         int remote_cand_count = 0;
                         kc_hpm_parse_remote_candidates(recv_buf, remote_cands, &remote_cand_count);
+                        
+                        if (strncmp(recv_buf, "PUNCH_CALL2:", 12) == 0) {
+                            kc_hpm_candidate_t my_cands[KC_HPM_CANDIDATES_MAX];
+                            int my_cand_count = 0;
+                            kc_hpm_gather_candidates(ctx, udp_fd, NULL, 0,
+                                my_cands, KC_HPM_CANDIDATES_MAX, &my_cand_count);
+                            fprintf(stderr, "hpm: ACK2->index (%s, sess %.16s, %d cands)\n", conn_id, sess_hex[0] ? sess_hex : conn_addr, my_cand_count);
+                            char ack_buf[KC_HPM_BUF];
+                            const char *ack_sess = sess_hex[0] ? sess_hex : conn_addr;
+                            snprintf(ack_buf, sizeof(ack_buf), "PUNCH_ACK2:%s:%s:%s\n",
+                                self_id, conn_id, ack_sess);
+                            for (int ci = 0; ci < my_cand_count; ci++) {
+                                char cbuf[128];
+                                const char *tname = "host";
+                                if (my_cands[ci].type == KC_HPM_CAND_LAN) tname = "lan";
+                                else if (my_cands[ci].type == KC_HPM_CAND_PUBLIC) tname = "public";
+                                else if (my_cands[ci].type == KC_HPM_CAND_SRFLX) tname = "srflx";
+                                snprintf(cbuf, sizeof(cbuf), "CAND:%s:%s:%u\n",
+                                    tname, my_cands[ci].addr, my_cands[ci].port);
+                                strncat(ack_buf, cbuf, sizeof(ack_buf) - strlen(ack_buf) - 1);
+                            }
+                            strncat(ack_buf, "END\n", sizeof(ack_buf) - strlen(ack_buf) - 1);
+                            kc_hpm_tcp_send(control_fd, ack_buf);
+                        }
                         
                         struct sockaddr_in peer;
                         memset(&peer, 0, sizeof(peer));
@@ -4471,6 +4583,7 @@ int kc_hpm_wait(
                         char pong[256];
                         char ping_sess[64] = {0}, ping_from[64] = {0}, ping_to[64] = {0};
                         sscanf(buf, "PUNCH_PING:%63[^:]:%63[^:]:%63s", ping_sess, ping_from, ping_to);
+                        fprintf(stderr, "hpm: PING(from=%s) -> PONG\n", ping_from);
                         snprintf(pong, sizeof(pong), "PUNCH_PONG:%s:%s:%s", ping_sess, ping_to, ping_from);
                         sendto(udp_fd, pong, strlen(pong), 0, (const struct sockaddr *)&from, sizeof(from));
                     } else {
@@ -4628,10 +4741,11 @@ static int kc_hpm_send_punch_req_cands(
     
     if (kc_hpm_tcp_send(ctrl_fd, send_buf) != KC_HPM_OK)
         return KC_HPM_ENET;
-    if (kc_hpm_tcp_readline(ctrl_fd, recv_buf, (int)sizeof(recv_buf), 5) < 0)
+    if (kc_hpm_tcp_readline(ctrl_fd, recv_buf, (int)sizeof(recv_buf), 20) < 0)
         return KC_HPM_OK;
     
     if (strncmp(recv_buf, "PUNCH_OK2:", 10) == 0) {
+        fprintf(stderr, "hpm: got PUNCH_OK2 (sess %.16s)\n", recv_buf + 10);
         char lbuf[128];
         while (kc_hpm_tcp_readline(ctrl_fd, lbuf, sizeof(lbuf), 5) > 0) {
             strncat(recv_buf, "\n", sizeof(recv_buf) - strlen(recv_buf) - 1);
@@ -4639,6 +4753,10 @@ static int kc_hpm_send_punch_req_cands(
             if (strcmp(lbuf, "END") == 0) break;
         }
         kc_hpm_parse_remote_candidates(recv_buf, remote_cands, remote_cand_count);
+        fprintf(stderr, "hpm: PUNCH_OK2 %d cands", *remote_cand_count);
+        for (int _ci = 0; _ci < *remote_cand_count; _ci++)
+            fprintf(stderr, " %s:%u", remote_cands[_ci].addr, (unsigned)remote_cands[_ci].port);
+        fprintf(stderr, "\n");
     }
     return KC_HPM_OK;
 }

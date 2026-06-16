@@ -3627,7 +3627,7 @@ int kc_hpm_serve_index(
 
     kc_hpm_set_nonblock(tcp_fd);
 
-    fprintf(stderr, "hpm: index server listening on %s:%u (tcp control)\n",
+    fprintf(stderr, "hpm: index server listening on %s:%u\n",
         host ? host : "0.0.0.0", (unsigned)port);
 
     while (1) {

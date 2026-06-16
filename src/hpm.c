@@ -120,7 +120,7 @@ static void print_help(const char *name) {
     printf("Usage: %s <command> [options]\n", name);
     printf("\n");
     printf("Commands:\n");
-    printf("  idx <port> [--max <N>] [--pow <N>] Start index server (pow default 0)\n");
+    printf("  idx <port> [--max <N>] [--pow <N>] Start index server on TCP control port\n");
     printf("  set <host>@<index[:port]> --tcp <port> [--sweep <n>] [--stun <url>]\n");
     printf("  set <host>@<index[:port]> --udp <port> [--sweep <n>] [--stun <url>]\n");
     printf("  del <host>@<index[:port]> Deregister from index\n");

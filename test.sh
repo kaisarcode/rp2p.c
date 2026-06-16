@@ -168,6 +168,91 @@ kc_test_index_stop() {
     return 0
 }
 
+# Verifies the index listens only on TCP.
+# @param $1 Index port.
+# @return 0 on success, 1 on failure.
+kc_test_index_tcp_only() {
+    port=$1
+    if ! ss -ltnH "( sport = :$port )" | grep -q LISTEN; then
+        kc_test_fail "index-tcp-listen-$port"
+        return 1
+    fi
+    if ss -lunH "( sport = :$port )" | grep -q .; then
+        kc_test_fail "index-no-udp-$port"
+        return 1
+    fi
+    kc_test_pass "index-tcp-only-$port"
+    return 0
+}
+
+# Verifies LIST, LOOKUP, and DEREGISTER over TCP control.
+# @param $1 Index port.
+# @param $2 Backend port.
+# @return 0 on success, 1 on failure.
+kc_test_control_catalog() {
+    port=$1
+    backend_port=$2
+    list_out="$TMP_ROOT/list.out"
+    lookup_out="$TMP_ROOT/lookup.out"
+    miss_out="$TMP_ROOT/miss.out"
+
+    kc_test_tcp_start "$backend_port" || return 1
+    "$BIN" set control@127.0.0.1:"$port" --tcp "$backend_port" > "$TMP_ROOT/control-set.log" 2>&1 &
+    spid=$!
+    sleep 2
+    if ! kill -0 "$spid" 2>/dev/null; then
+        wait "$spid" 2>/dev/null || true
+        kill -9 "$HPID" 2>/dev/null || true
+        wait "$HPID" 2>/dev/null || true
+        kc_test_fail "control-register"
+        return 1
+    fi
+    if ! printf 'LIST\n' | nc -w 2 127.0.0.1 "$port" > "$list_out" 2>/dev/null; then
+        kill -9 "$spid" "$HPID" 2>/dev/null
+        wait "$spid" "$HPID" 2>/dev/null
+        kc_test_fail "control-list"
+        return 1
+    fi
+    if ! grep -q '^PEER:control$' "$list_out"; then
+        kill -9 "$spid" "$HPID" 2>/dev/null
+        wait "$spid" "$HPID" 2>/dev/null
+        kc_test_fail "control-list"
+        return 1
+    fi
+    if ! printf 'LOOKUP:control\n' | nc -w 2 127.0.0.1 "$port" > "$lookup_out" 2>/dev/null; then
+        kill -9 "$spid" "$HPID" 2>/dev/null
+        wait "$spid" "$HPID" 2>/dev/null
+        kc_test_fail "control-lookup"
+        return 1
+    fi
+    if ! grep -q '^PEER:control$' "$lookup_out"; then
+        kill -9 "$spid" "$HPID" 2>/dev/null
+        wait "$spid" "$HPID" 2>/dev/null
+        kc_test_fail "control-lookup"
+        return 1
+    fi
+    if ! "$BIN" del control@127.0.0.1:"$port" > "$TMP_ROOT/control-del.log" 2>&1; then
+        kill -9 "$spid" "$HPID" 2>/dev/null
+        wait "$spid" "$HPID" 2>/dev/null
+        kc_test_fail "control-deregister"
+        return 1
+    fi
+    if ! printf 'LOOKUP:control\n' | nc -w 2 127.0.0.1 "$port" > "$miss_out" 2>/dev/null; then
+        kill -9 "$spid" "$HPID" 2>/dev/null
+        wait "$spid" "$HPID" 2>/dev/null
+        kc_test_fail "control-post-del"
+        return 1
+    fi
+    kill -9 "$spid" "$HPID" 2>/dev/null || true
+    wait "$spid" "$HPID" 2>/dev/null || true
+    if ! grep -q '^NOT_FOUND$' "$miss_out"; then
+        kc_test_fail "control-post-del"
+        return 1
+    fi
+    kc_test_pass "control-catalog"
+    return 0
+}
+
 # Starts a local TCP echo backend.
 # @param $1 Backend port.
 # @return 0 on success, 1 on failure.
@@ -190,7 +275,7 @@ kc_test_tcp_roundtrip() {
     msg=$2
     out=$3
     i=0
-    while [ "$i" -lt 10 ]; do
+    while [ "$i" -lt 20 ]; do
         if printf '%s' "$msg" | socat -t 5 - TCP:127.0.0.1:"$dst_port" > "$out" 2>/dev/null; then
             return 0
         fi
@@ -750,11 +835,14 @@ kc_test_main() {
     vip_backend_1=$((PORT_BASE + 25))
     vip_backend_2=$((PORT_BASE + 26))
     vip_backend_3=$((PORT_BASE + 27))
+    control_backend=$((PORT_BASE + 29))
     auth_listen_1=$((PORT_BASE + 112))
 
     kc_test_binary || return 1
     kc_test_cli || return 1
     kc_test_index_start "$index_port" 0 "" public-default || return 1
+    kc_test_index_tcp_only "$index_port" || return 1
+    kc_test_control_catalog "$index_port" "$control_backend" || return 1
     kc_test_set_tcp "$index_port" host1 "$backend_tcp_1" "" || return 1
     kc_test_tcp_echo "$index_port" web "$backend_tcp_2" "$listen_tcp_1" "" || return 1
     kc_test_tcp_concurrent "$index_port" web2 "$backend_tcp_3" "$listen_tcp_2" "" || return 1
@@ -775,6 +863,8 @@ kc_test_main() {
     kc_test_vip_register "$vip_port_1" "$vip_port_2" "$vip_port_3" \
         "$vip_port_4" "$vip_port_5" "$vip_backend_1" "$vip_backend_2" \
         "$vip_backend_3" "$vip_port_6" || return 1
+    pkill -9 -P $$ 2>/dev/null || true
+    wait 2>/dev/null || true
     return 0
 }
 

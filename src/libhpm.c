@@ -1,6 +1,6 @@
 /**
  * libhpm.c - HolePunchMan.
- * Summary: Core shared library. TCP control, UDP NAT_CHECK, P2P relay.
+ * Summary: Core shared library. TCP rendezvous control and direct P2P UDP relay.
  *
  * Author:  KaisarCode
  * Website: https://kaisarcode.com
@@ -2905,20 +2905,13 @@ static void kc_hpm_generate_key(char *out) {
  * Add peer.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_add_peer(
-    kc_hpm_t *ctx,
-    const char *id,
-    const char *addr,
-    unsigned short port)
+static int kc_hpm_add_peer(kc_hpm_t *ctx, const char *id)
 {
     size_t id_len;
     int idx;
 
     idx = kc_hpm_find_peer(ctx, id);
     if (idx >= 0) {
-        memcpy(ctx->peers[idx].addr, addr, KC_HPM_ADDR_MAX);
-        ctx->peers[idx].addr[KC_HPM_ADDR_MAX] = '\0';
-        ctx->peers[idx].port = port;
         ctx->peers[idx].last_seen = time(NULL);
         kc_hpm_generate_key(ctx->peers[idx].key);
         return KC_HPM_OK;
@@ -2932,10 +2925,6 @@ static int kc_hpm_add_peer(
         id_len = KC_HPM_ID_MAX;
     memcpy(ctx->peers[ctx->n_peers].id, id, id_len);
     ctx->peers[ctx->n_peers].id[id_len] = '\0';
-
-    memcpy(ctx->peers[ctx->n_peers].addr, addr, KC_HPM_ADDR_MAX);
-    ctx->peers[ctx->n_peers].addr[KC_HPM_ADDR_MAX] = '\0';
-    ctx->peers[ctx->n_peers].port = port;
 
     ctx->peers[ctx->n_peers].last_seen = time(NULL);
     kc_hpm_generate_key(ctx->peers[ctx->n_peers].key);
@@ -2972,16 +2961,12 @@ static int kc_hpm_remove_peer(kc_hpm_t *ctx, const char *id) {
  * @param port Peer port.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_refresh_peer(kc_hpm_t *ctx, const char *id, const char *addr,
-    unsigned short port)
+static int kc_hpm_refresh_peer(kc_hpm_t *ctx, const char *id)
 {
     int idx;
 
     idx = kc_hpm_find_peer(ctx, id);
     if (idx < 0) return KC_HPM_ENOENT;
-    memcpy(ctx->peers[idx].addr, addr, KC_HPM_ADDR_MAX);
-    ctx->peers[idx].addr[KC_HPM_ADDR_MAX] = '\0';
-    ctx->peers[idx].port = port;
     ctx->peers[idx].last_seen = time(NULL);
     return KC_HPM_OK;
 }
@@ -3058,21 +3043,18 @@ static int kc_hpm_store_pow_challenge(kc_hpm_t *ctx,
  * Formats one successful register reply.
  * @param ctx      Open context.
  * @param id       Registered service identifier.
- * @param addr     Observed address.
- * @param port     Observed port.
  * @param reply    Output reply buffer.
  * @param reply_sz Output reply capacity.
  * @return 1 on success, 0 on failure.
  */
 static int kc_hpm_format_register_ok(kc_hpm_t *ctx, const char *id,
-    const char *addr, unsigned short port, char *reply, size_t reply_sz)
+    char *reply, size_t reply_sz)
 {
     int pidx;
 
     pidx = kc_hpm_find_peer(ctx, id);
     if (pidx < 0) return 0;
-    snprintf(reply, reply_sz, "OK:OBSERVED:%s:%u:KEY:%s", addr,
-        (unsigned)port, ctx->peers[pidx].key);
+    snprintf(reply, reply_sz, "OK:KEY:%s", ctx->peers[pidx].key);
     return 1;
 }
 
@@ -3163,24 +3145,6 @@ static void kc_hpm_pending_punch_evict_stale(kc_hpm_t *ctx) {
             i--;
         }
     }
-}
-
-/**
- * conn find by id.
- * @return 0 on success, -1 on error.
- */
-
-/**
- * Conn find by id.
- * @return 0 on success, -1 on error.
- */
-static int kc_hpm_conn_find_by_id(kc_hpm_t *ctx, const char *id) {
-    int i;
-    for (i = 0; i < ctx->n_conns; i++) {
-        if (ctx->conns[i].registered &&
-            strcmp(ctx->conns[i].id, id) == 0) return i;
-    }
-    return -1;
 }
 
 /**
@@ -3408,9 +3372,8 @@ int kc_hpm_set_stun_url(kc_hpm_t *ctx, const char *url) {
  * @param out_count  Output count.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_gather_candidates(kc_hpm_t *ctx, int udp_fd, const char *index_host, unsigned short index_port, kc_hpm_candidate_t *out, int out_cap, int *out_count) {
-    (void)index_host;
-    (void)index_port;
+int kc_hpm_gather_candidates(kc_hpm_t *ctx, int udp_fd,
+    kc_hpm_candidate_t *out, int out_cap, int *out_count) {
     struct sockaddr_in udp_sa;
     char stun_ip[KC_HPM_ADDR_MAX + 1];
     unsigned short stun_port;
@@ -3514,8 +3477,17 @@ int kc_hpm_punch_select(kc_hpm_t *ctx, int sweep_limit, int udp_fd, const char *
                 socklen_t src_len = sizeof(src_addr);
                 int n = recvfrom(udp_fd, recv_buf, sizeof(recv_buf) - 1, 0, (struct sockaddr *)&src_addr, &src_len);
                 if (n > 0) {
+                    char rx_sess[64] = {0};
+                    char rx_from[KC_HPM_ID_MAX + 1] = {0};
+                    char rx_to[KC_HPM_ID_MAX + 1] = {0};
+
                     recv_buf[n] = '\0';
-                    if (strncmp(recv_buf, "PUNCH_PONG:", 11) == 0 || strncmp(recv_buf, "PUNCH_PING:", 11) == 0) {
+                    if ((sscanf(recv_buf, "PUNCH_PONG:%63[^:]:%63[^:]:%63s",
+                        rx_sess, rx_from, rx_to) == 3 ||
+                        sscanf(recv_buf, "PUNCH_PING:%63[^:]:%63[^:]:%63s",
+                        rx_sess, rx_from, rx_to) == 3) &&
+                        strcmp(rx_sess, session_id) == 0 &&
+                        strcmp(rx_from, to_id) == 0 && strcmp(rx_to, from_id) == 0) {
                         *selected_addr = src_addr;
                         if (strncmp(recv_buf, "PUNCH_PING:", 11) == 0) {
                             char pong_msg[256];
@@ -3567,8 +3539,17 @@ int kc_hpm_punch_select(kc_hpm_t *ctx, int sweep_limit, int udp_fd, const char *
                     socklen_t src_len = sizeof(src_addr);
                     int n = recvfrom(udp_fd, recv_buf, sizeof(recv_buf) - 1, 0, (struct sockaddr *)&src_addr, &src_len);
                     if (n > 0) {
+                        char rx_sess[64] = {0};
+                        char rx_from[KC_HPM_ID_MAX + 1] = {0};
+                        char rx_to[KC_HPM_ID_MAX + 1] = {0};
+
                         recv_buf[n] = '\0';
-                        if (strncmp(recv_buf, "PUNCH_PONG:", 11) == 0 || strncmp(recv_buf, "PUNCH_PING:", 11) == 0) {
+                        if ((sscanf(recv_buf, "PUNCH_PONG:%63[^:]:%63[^:]:%63s",
+                            rx_sess, rx_from, rx_to) == 3 ||
+                            sscanf(recv_buf, "PUNCH_PING:%63[^:]:%63[^:]:%63s",
+                            rx_sess, rx_from, rx_to) == 3) &&
+                            strcmp(rx_sess, session_id) == 0 &&
+                            strcmp(rx_from, to_id) == 0 && strcmp(rx_to, from_id) == 0) {
                             *selected_addr = src_addr;
                             if (strncmp(recv_buf, "PUNCH_PING:", 11) == 0) {
                                 char pong_msg[256];
@@ -3598,7 +3579,7 @@ int kc_hpm_serve_index(
     const char *host,
     unsigned short port)
 {
-    kc_hpm_fd_t tcp_fd, udp_fd;
+    kc_hpm_fd_t tcp_fd;
     struct addrinfo hints;
     struct addrinfo *ai;
     char port_str[16];
@@ -3626,24 +3607,9 @@ int kc_hpm_serve_index(
         { KC_HPM_FD_CLOSE(tcp_fd); freeaddrinfo(ai); kc_hpm_platform_cleanup(); return KC_HPM_ENET; }
     freeaddrinfo(ai);
 
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
-    hints.ai_flags = AI_PASSIVE;
-    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-    ret = getaddrinfo(host, port_str, &hints, &ai);
-    if (ret != 0) { KC_HPM_FD_CLOSE(tcp_fd); kc_hpm_platform_cleanup(); return KC_HPM_ENET; }
-    udp_fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-    if (KC_HPM_ISERR(udp_fd)) { freeaddrinfo(ai); KC_HPM_FD_CLOSE(tcp_fd); kc_hpm_platform_cleanup(); return KC_HPM_ENET; }
-    { int reuse = 1; setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, (void *)&reuse, sizeof(reuse)); }
-    if (bind(udp_fd, ai->ai_addr, (socklen_t)ai->ai_addrlen) == SOCKET_ERROR)
-        { KC_HPM_FD_CLOSE(udp_fd); KC_HPM_FD_CLOSE(tcp_fd); freeaddrinfo(ai); kc_hpm_platform_cleanup(); return KC_HPM_ENET; }
-    freeaddrinfo(ai);
-
     kc_hpm_set_nonblock(tcp_fd);
-    kc_hpm_set_nonblock(udp_fd);
 
-    fprintf(stderr, "hpm: index server listening on %s:%u (tcp+udp)\n",
+    fprintf(stderr, "hpm: index server listening on %s:%u (tcp control)\n",
         host ? host : "0.0.0.0", (unsigned)port);
 
     while (1) {
@@ -3651,8 +3617,7 @@ int kc_hpm_serve_index(
 
         FD_ZERO(&fds);
         FD_SET(tcp_fd, &fds);
-        FD_SET(udp_fd, &fds);
-        maxfd = (int)(tcp_fd > udp_fd ? tcp_fd : udp_fd);
+        maxfd = (int)tcp_fd;
 
         kc_hpm_lock(ctx);
         for (i = 0; i < ctx->n_conns; i++) {
@@ -3675,27 +3640,6 @@ int kc_hpm_serve_index(
                 kc_hpm_lock(ctx);
                 kc_hpm_conn_add(ctx, client_fd);
                 kc_hpm_unlock(ctx);
-            }
-        }
-
-        if (FD_ISSET(udp_fd, &fds)) {
-            char nat_buf[KC_HPM_BUF];
-            struct sockaddr_in from;
-            socklen_t fromlen = sizeof(from);
-            n = (int)recvfrom(udp_fd, nat_buf, sizeof(nat_buf) - 1, 0,
-                (struct sockaddr *)&from, &fromlen);
-            if (n > 0) {
-                nat_buf[n] = '\0';
-                if (strcmp(nat_buf, "NAT_CHECK") == 0) {
-                    char nat_addr[KC_HPM_ADDR_MAX + 1];
-                    unsigned short nat_port;
-                    char reply[KC_HPM_BUF];
-                    kc_hpm_extract_addr(&from, nat_addr, sizeof(nat_addr), &nat_port);
-                    snprintf(reply, sizeof(reply), "NAT_REPLY:%s:%u",
-                        nat_addr, (unsigned)nat_port);
-                    sendto(udp_fd, reply, strlen(reply), 0,
-                        (const struct sockaddr *)&from, fromlen);
-                }
             }
         }
 
@@ -3768,38 +3712,19 @@ int kc_hpm_serve_index(
                         if (sscanf(cmd_buf, "%31[^:]", cmd) != 1) continue;
 
                         if (strcmp(cmd, "REGISTER") == 0) {
-                            char addr_str[KC_HPM_ADDR_MAX + 1];
-                            unsigned short addr_port;
                             struct sockaddr_in peer_sa;
                             socklen_t peer_len = sizeof(peer_sa);
 
-                            if (getpeername(c->fd, (struct sockaddr *)&peer_sa, &peer_len) == 0)
-                                kc_hpm_extract_addr(&peer_sa, addr_str, sizeof(addr_str), &addr_port);
-                            else
-                                { strcpy(addr_str, "0.0.0.0"); addr_port = 0; }
-
-                            {
-                                const char *addr_marker = strstr(cmd_buf, ":ADDR:");
-                                if (addr_marker) {
-                                    unsigned int ov_port;
-                                    char ov_addr[KC_HPM_ADDR_MAX + 1];
-                                    if (sscanf(addr_marker, ":ADDR:%47[^:]:%u",
-                                        ov_addr, &ov_port) == 2) {
-                                        memcpy(addr_str, ov_addr, KC_HPM_ADDR_MAX);
-                                        addr_str[KC_HPM_ADDR_MAX] = '\0';
-                                        addr_port = (unsigned short)ov_port;
-                                    }
-                                }
-                            }
+                            if (getpeername(c->fd, (struct sockaddr *)&peer_sa,
+                                &peer_len) != 0)
+                                memset(&peer_sa, 0, sizeof(peer_sa));
 
                             {
                                 const char *rstart = cmd_buf + 9;
                                 const char *sol = strstr(rstart, ":SOLUTION:");
-                                const char *addr = strstr(rstart, ":ADDR:");
                                 const char *rend;
                                 size_t rlen;
-                                if (sol && addr) rend = (sol < addr) ? sol : addr;
-                                else rend = sol ? sol : (addr ? addr : NULL);
+                                rend = sol;
                                 if (!rend) rend = rstart + strlen(rstart);
                                 rlen = rend - rstart;
                                 if (rlen > KC_HPM_ID_MAX) rlen = KC_HPM_ID_MAX;
@@ -3835,8 +3760,8 @@ int kc_hpm_serve_index(
                                         continue;
                                     }
                                     kc_hpm_remove_pow_challenge(ctx, cidx);
-                                    if (kc_hpm_add_peer(ctx, id, addr_str, addr_port) == KC_HPM_OK &&
-                                        kc_hpm_format_register_ok(ctx, id, addr_str, addr_port,
+                                    if (kc_hpm_add_peer(ctx, id) == KC_HPM_OK &&
+                                        kc_hpm_format_register_ok(ctx, id,
                                             reply_buf, sizeof(reply_buf)))
                                     {
                                         kc_hpm_tcp_send(c->fd, reply_buf);
@@ -3850,8 +3775,8 @@ int kc_hpm_serve_index(
                                     continue;
                                 }
                             } else if (c->registered && strcmp(c->id, id) == 0) {
-                                if (kc_hpm_refresh_peer(ctx, id, addr_str, addr_port) == KC_HPM_OK &&
-                                    kc_hpm_format_register_ok(ctx, id, addr_str, addr_port,
+                                if (kc_hpm_refresh_peer(ctx, id) == KC_HPM_OK &&
+                                    kc_hpm_format_register_ok(ctx, id,
                                         reply_buf, sizeof(reply_buf)))
                                 {
                                     kc_hpm_tcp_send(c->fd, reply_buf);
@@ -3985,10 +3910,8 @@ int kc_hpm_serve_index(
                         } else if (strcmp(cmd, "LIST") == 0) {
                             kc_hpm_evict_stale(ctx);
                             for (srv_idx = 0; srv_idx < ctx->n_peers; srv_idx++) {
-                                snprintf(reply_buf, sizeof(reply_buf), "PEER:%s:%s:%u",
-                                    ctx->peers[srv_idx].id,
-                                    ctx->peers[srv_idx].addr,
-                                    (unsigned)ctx->peers[srv_idx].port);
+                                snprintf(reply_buf, sizeof(reply_buf), "PEER:%s",
+                                    ctx->peers[srv_idx].id);
                                 kc_hpm_tcp_send(c->fd, reply_buf);
                             }
                             kc_hpm_tcp_send(c->fd, "END");
@@ -3997,42 +3920,9 @@ int kc_hpm_serve_index(
                             if (sscanf(cmd_buf, "LOOKUP:%63[^\n]", id) == 1) {
                                 srv_idx = kc_hpm_find_peer(ctx, id);
                                 if (srv_idx >= 0) {
-                                    snprintf(reply_buf, sizeof(reply_buf), "PEER:%s:%s:%u",
-                                        ctx->peers[srv_idx].id,
-                                        ctx->peers[srv_idx].addr,
-                                        (unsigned)ctx->peers[srv_idx].port);
+                                    snprintf(reply_buf, sizeof(reply_buf), "PEER:%s",
+                                        ctx->peers[srv_idx].id);
                                     kc_hpm_tcp_send(c->fd, reply_buf);
-                                } else {
-                                    kc_hpm_tcp_send(c->fd, "NOT_FOUND");
-                                }
-                            }
-
-                        } else if (strcmp(cmd, "PUNCH_REQ") == 0) {
-                            char self_id[KC_HPM_ID_MAX + 1];
-                            char target_id[KC_HPM_ID_MAX + 1];
-                            char my_addr[KC_HPM_ADDR_MAX + 1];
-                            unsigned short my_port;
-
-                            if (sscanf(cmd_buf, "PUNCH_REQ:%63[^:]:%63[^:]:%47[^:]:%hu",
-                                self_id, target_id, my_addr, &my_port) == 4) {
-                                srv_idx = kc_hpm_find_peer(ctx, target_id);
-                                if (srv_idx >= 0) {
-                                    int conn_idx = kc_hpm_conn_find_by_id(ctx, target_id);
-                                    if (conn_idx >= 0) {
-                                        snprintf(reply_buf, sizeof(reply_buf),
-                                            "PUNCH_CALL:%s:%s:%u",
-                                            self_id, my_addr, (unsigned)my_port);
-                                        kc_hpm_tcp_send(ctx->conns[conn_idx].fd, reply_buf);
-
-                                        snprintf(reply_buf, sizeof(reply_buf),
-                                            "PUNCH_OK:%s:%s:%u",
-                                            target_id,
-                                            ctx->peers[srv_idx].addr,
-                                            (unsigned)ctx->peers[srv_idx].port);
-                                        kc_hpm_tcp_send(c->fd, reply_buf);
-                                    } else {
-                                        kc_hpm_tcp_send(c->fd, "ERROR:target offline");
-                                    }
                                 } else {
                                     kc_hpm_tcp_send(c->fd, "NOT_FOUND");
                                 }
@@ -4055,46 +3945,8 @@ int kc_hpm_serve_index(
     }
 
     KC_HPM_FD_CLOSE(tcp_fd);
-    KC_HPM_FD_CLOSE(udp_fd);
     kc_hpm_platform_cleanup();
     return KC_HPM_OK;
-}
-
-/**
- * udp nat check.
- * @return 0 on success, -1 on error.
- */
-
-/**
- * Udp nat check.
- * @return 0 on success, -1 on error.
- */
-int kc_hpm_udp_nat_check(
-    kc_hpm_t *ctx,
-    const char *index_host,
-    unsigned short index_port,
-    char *out_addr,
-    unsigned short *out_port)
-{
-    kc_hpm_fd_t fd;
-    char recv_buf[KC_HPM_BUF];
-    unsigned int p;
-    int ret;
-
-    (void)ctx;
-    fd = kc_hpm_create_socket("0.0.0.0", 0);
-    if (KC_HPM_ISERR(fd)) return KC_HPM_ENET;
-
-    ret = kc_hpm_send_recv(fd, index_host, index_port, "NAT_CHECK",
-        recv_buf, sizeof(recv_buf), 5);
-    KC_HPM_FD_CLOSE(fd);
-
-    if (ret != KC_HPM_OK) return ret;
-    if (sscanf(recv_buf, "NAT_REPLY:%47[^:]:%u", out_addr, &p) == 2) {
-        *out_port = (unsigned short)p;
-        return KC_HPM_OK;
-    }
-    return KC_HPM_ERROR;
 }
 
 /**
@@ -4253,14 +4105,9 @@ int kc_hpm_wait(
     char send_buf[KC_HPM_BUF];
     char recv_buf[KC_HPM_BUF];
     kc_hpm_fd_t udp_fd = KC_HPM_FD_INVALID;
-    char observed_addr[KC_HPM_ADDR_MAX + 1];
-    unsigned int observed_port;
     time_t last_heartbeat;
 
-    unsigned short target_port;
-
     (void)bind_port;
-    (void)target_port;
     if (!ctx) return KC_HPM_ERROR;
     if (ctx->proto != KC_HPM_PROTO_TCP && ctx->proto != KC_HPM_PROTO_UDP)
         return KC_HPM_ERROR;
@@ -4317,53 +4164,20 @@ int kc_hpm_wait(
 
     {
         char obs_key[KC_HPM_KEY_STR_SZ];
-        int n_match = sscanf(recv_buf,
-            "OK:OBSERVED:%47[^:]:%u:KEY:%32[^\n]",
-            observed_addr, &observed_port, obs_key);
-        if (n_match < 2) {
+        if (sscanf(recv_buf, "OK:KEY:%32[^\n]", obs_key) != 1) {
             fprintf(stderr, "hpm: registration failed: %s\n", recv_buf);
             KC_HPM_FD_CLOSE(control_fd);
             if (!KC_HPM_ISERR(udp_fd)) KC_HPM_FD_CLOSE(udp_fd);
             return KC_HPM_ERROR;
         }
-        if (n_match == 3) {
-            memcpy(ctx->key, obs_key, KC_HPM_KEY_STR_SZ);
-            ctx->key[KC_HPM_KEY_STR_SZ - 1] = '\0';
-            kc_hpm_save_key(self_id, ctx->key);
-        }
+        memcpy(ctx->key, obs_key, KC_HPM_KEY_STR_SZ);
+        ctx->key[KC_HPM_KEY_STR_SZ - 1] = '\0';
+        kc_hpm_save_key(self_id, ctx->key);
     }
 
-    {
-        struct sockaddr_in udp_sa;
-        char stun_ip[KC_HPM_ADDR_MAX + 1];
-        unsigned short stun_port;
-        socklen_t udp_sa_len = sizeof(udp_sa);
-
-        stun_ip[0] = '\0';
-        stun_port = 0;
-        if (getsockname(udp_fd, (struct sockaddr *)&udp_sa, &udp_sa_len) == 0) {
-            unsigned short udp_port = ntohs(udp_sa.sin_port);
-            if (ctx->stun_url[0])
-                kc_hpm_stun_binding(ctx, udp_fd, stun_ip, (int)sizeof(stun_ip),
-                    &stun_port);
-            if (stun_ip[0] != '\0') {
-                strncpy(observed_addr, stun_ip, sizeof(observed_addr) - 1);
-                observed_addr[sizeof(observed_addr) - 1] = '\0';
-            } else {
-                memcpy(observed_addr, "127.0.0.1", 10);
-            }
-            observed_port = stun_port ? stun_port : udp_port;
-            snprintf(send_buf, sizeof(send_buf),
-                "REGISTER:%s:ADDR:%s:%u", self_id, observed_addr, (unsigned)observed_port);
-            kc_hpm_tcp_send(control_fd, send_buf);
-            kc_hpm_tcp_readline(control_fd, recv_buf, (int)sizeof(recv_buf), 5);
-        }
-    }
-
-    fprintf(stderr, "hpm: published %s backend 127.0.0.1:%u as '%s' (srflx %s:%u)\n",
+    fprintf(stderr, "hpm: published %s backend 127.0.0.1:%u as '%s'\n",
         ctx->proto == KC_HPM_PROTO_TCP ? "tcp" : "udp",
-        (unsigned)ctx->bind_port, self_id, observed_addr,
-        (unsigned)observed_port);
+        (unsigned)ctx->bind_port, self_id);
 
     {
         kc_hpm_udp_server_session_t *sessions;
@@ -4417,26 +4231,24 @@ int kc_hpm_wait(
                     (int)sizeof(recv_buf), 0) > 0)
                 {
                     char conn_id[KC_HPM_ID_MAX + 1];
-                    char conn_addr[KC_HPM_ADDR_MAX + 1];
+                    char remote_token[KC_HPM_ADDR_MAX + 1];
                     char sess_hex[KC_HPM_STREAM_SESSION_ID_SZ * 2 + 1];
                     unsigned char sess_id[KC_HPM_STREAM_SESSION_ID_SZ];
-                    unsigned int conn_port;
 
                     memset(sess_hex, 0, sizeof(sess_hex));
 
-                    if (sscanf(recv_buf, "PUNCH_CALL2:%63[^:]:%47s", conn_id, conn_addr) == 2 || 
-                        sscanf(recv_buf, "PUNCH_CALL:%63[^:]:%47[^:]:%u", conn_id, conn_addr, &conn_port) == 3)
+                    if (sscanf(recv_buf, "PUNCH_CALL2:%63[^:]:%47s", conn_id,
+                        remote_token) == 2)
                     {
-                        if (ctx->proto == KC_HPM_PROTO_TCP &&
-                            strncmp(recv_buf, "PUNCH_CALL2:", 12) == 0) {
-                            memcpy(sess_hex, conn_addr,
+                        if (ctx->proto == KC_HPM_PROTO_TCP) {
+                            memcpy(sess_hex, remote_token,
                                 KC_HPM_STREAM_SESSION_ID_SZ * 2);
                             sess_hex[KC_HPM_STREAM_SESSION_ID_SZ * 2] = '\0';
                             if (!kc_hpm_hex_decode(sess_hex, sess_id, sizeof(sess_id)))
                                 continue;
                         }
 
-                        if (strncmp(recv_buf, "PUNCH_CALL2:", 12) == 0) {
+                        {
                             char lbuf[128];
                             while (kc_hpm_tcp_readline(control_fd, lbuf, sizeof(lbuf), 5) > 0) {
                                 strncat(recv_buf, "\n", sizeof(recv_buf) - strlen(recv_buf) - 1);
@@ -4447,37 +4259,34 @@ int kc_hpm_wait(
                         kc_hpm_candidate_t remote_cands[KC_HPM_CANDIDATES_MAX];
                         int remote_cand_count = 0;
                         kc_hpm_parse_remote_candidates(recv_buf, remote_cands, &remote_cand_count);
-                        
-                        if (strncmp(recv_buf, "PUNCH_CALL2:", 12) == 0) {
-                            kc_hpm_candidate_t my_cands[KC_HPM_CANDIDATES_MAX];
-                            int my_cand_count = 0;
-                            kc_hpm_gather_candidates(ctx, udp_fd, NULL, 0,
-                                my_cands, KC_HPM_CANDIDATES_MAX, &my_cand_count);
-                            char ack_buf[KC_HPM_BUF];
-                            const char *ack_sess = sess_hex[0] ? sess_hex : conn_addr;
-                            snprintf(ack_buf, sizeof(ack_buf), "PUNCH_ACK2:%s:%s:%s\n",
-                                self_id, conn_id, ack_sess);
-                            for (int ci = 0; ci < my_cand_count; ci++) {
-                                char cbuf[128];
-                                const char *tname = "host";
-                                if (my_cands[ci].type == KC_HPM_CAND_LAN) tname = "lan";
-                                else if (my_cands[ci].type == KC_HPM_CAND_PUBLIC) tname = "public";
-                                else if (my_cands[ci].type == KC_HPM_CAND_SRFLX) tname = "srflx";
-                                snprintf(cbuf, sizeof(cbuf), "CAND:%s:%s:%u\n",
-                                    tname, my_cands[ci].addr, my_cands[ci].port);
-                                strncat(ack_buf, cbuf, sizeof(ack_buf) - strlen(ack_buf) - 1);
-                            }
-                            strncat(ack_buf, "END\n", sizeof(ack_buf) - strlen(ack_buf) - 1);
-                            kc_hpm_tcp_send(control_fd, ack_buf);
+                        kc_hpm_candidate_t my_cands[KC_HPM_CANDIDATES_MAX];
+                        int my_cand_count = 0;
+                        char ack_buf[KC_HPM_BUF];
+                        const char *ack_sess = sess_hex[0] ? sess_hex : remote_token;
+
+                        kc_hpm_gather_candidates(ctx, udp_fd, my_cands,
+                            KC_HPM_CANDIDATES_MAX, &my_cand_count);
+                        snprintf(ack_buf, sizeof(ack_buf), "PUNCH_ACK2:%s:%s:%s\n",
+                            self_id, conn_id, ack_sess);
+                        for (int ci = 0; ci < my_cand_count; ci++) {
+                            char cbuf[128];
+                            const char *tname = "host";
+                            if (my_cands[ci].type == KC_HPM_CAND_LAN) tname = "lan";
+                            else if (my_cands[ci].type == KC_HPM_CAND_PUBLIC) tname = "public";
+                            else if (my_cands[ci].type == KC_HPM_CAND_SRFLX) tname = "srflx";
+                            snprintf(cbuf, sizeof(cbuf), "CAND:%s:%s:%u\n",
+                                tname, my_cands[ci].addr, my_cands[ci].port);
+                            strncat(ack_buf, cbuf, sizeof(ack_buf) - strlen(ack_buf) - 1);
                         }
+                        strncat(ack_buf, "END\n", sizeof(ack_buf) - strlen(ack_buf) - 1);
+                        kc_hpm_tcp_send(control_fd, ack_buf);
                         
                         struct sockaddr_in peer;
                         memset(&peer, 0, sizeof(peer));
-                        if (kc_hpm_punch_select(ctx, ctx->sweep, udp_fd, conn_addr, self_id, conn_id, remote_cands, remote_cand_count, &peer) != KC_HPM_OK) {
-                            peer.sin_family = AF_INET;
-                            peer.sin_port = htons((unsigned short)conn_port);
-                            inet_pton(AF_INET, conn_addr, &peer.sin_addr);
-                        }
+                        if (kc_hpm_punch_select(ctx, ctx->sweep, udp_fd, ack_sess,
+                            self_id, conn_id, remote_cands, remote_cand_count,
+                            &peer) != KC_HPM_OK)
+                            continue;
 
                         int found = -1;
                         for (i = 0; i < n_sessions; i++) {
@@ -4832,11 +4641,8 @@ int kc_hpm_connect(
     kc_hpm_fd_t tcp_listen_fd;
     kc_hpm_udp_consumer_session_t *sessions;
     int n_sessions, cap_sessions;
-    char target_addr[KC_HPM_ADDR_MAX + 1];
-    unsigned short target_port;
 
     (void)bind_port;
-    (void)target_port;
     if (!ctx) return KC_HPM_ERROR;
     if (ctx->bind_port == 0) return KC_HPM_ERROR;
     if (kc_hpm_platform_init() != 0) return KC_HPM_ENET;
@@ -4865,16 +4671,16 @@ int kc_hpm_connect(
     }
     {
         char recv_buf[KC_HPM_BUF];
-        unsigned int p;
         snprintf(recv_buf, sizeof(recv_buf), "LOOKUP:%s", target_id);
         if (kc_hpm_tcp_send(ctrl_fd, recv_buf) != KC_HPM_OK ||
             kc_hpm_tcp_readline(ctrl_fd, recv_buf, (int)sizeof(recv_buf), 5) < 0)
         { KC_HPM_FD_CLOSE(ctrl_fd); KC_HPM_FD_CLOSE(local_fd); if (!KC_HPM_ISERR(tcp_listen_fd)) KC_HPM_FD_CLOSE(tcp_listen_fd); kc_hpm_platform_cleanup(); return KC_HPM_ENET; }
         if (strcmp(recv_buf, "NOT_FOUND") == 0)
         { KC_HPM_FD_CLOSE(ctrl_fd); KC_HPM_FD_CLOSE(local_fd); if (!KC_HPM_ISERR(tcp_listen_fd)) KC_HPM_FD_CLOSE(tcp_listen_fd); kc_hpm_platform_cleanup(); return KC_HPM_ENOENT; }
-        if (sscanf(recv_buf, "PEER:%*[^:]:%47[^:]:%u", target_addr, &p) != 2)
+        if (strcmp(recv_buf, "PEER:") == 0 ||
+            strncmp(recv_buf, "PEER:", 5) != 0 ||
+            strcmp(recv_buf + 5, target_id) != 0)
         { KC_HPM_FD_CLOSE(ctrl_fd); KC_HPM_FD_CLOSE(local_fd); if (!KC_HPM_ISERR(tcp_listen_fd)) KC_HPM_FD_CLOSE(tcp_listen_fd); kc_hpm_platform_cleanup(); return KC_HPM_ERROR; }
-        target_port = (unsigned short)p;
     }
     KC_HPM_FD_CLOSE(ctrl_fd);
 
@@ -4926,9 +4732,7 @@ int kc_hpm_connect(
             if (!KC_HPM_ISERR(client_fd)) {
                 ctrl_fd = kc_hpm_tcp_connect(index_host, index_port);
                 if (!KC_HPM_ISERR(ctrl_fd)) {
-                    char punch_addr[KC_HPM_ADDR_MAX + 1];
                     unsigned char sess_id_bin[KC_HPM_STREAM_SESSION_ID_SZ];
-                    memcpy(punch_addr, target_addr, sizeof(punch_addr));
                     
                     kc_hpm_candidate_t cands[KC_HPM_CANDIDATES_MAX];
                     int cand_count = 0;
@@ -4942,7 +4746,8 @@ int kc_hpm_connect(
                     }
                     
                     int temp_udp = kc_hpm_create_socket("0.0.0.0", 0);
-                    kc_hpm_gather_candidates(ctx, temp_udp, index_host, index_port, cands, KC_HPM_CANDIDATES_MAX, &cand_count);
+                    kc_hpm_gather_candidates(ctx, temp_udp, cands,
+                        KC_HPM_CANDIDATES_MAX, &cand_count);
                     
                     kc_hpm_send_punch_req_cands(ctrl_fd, self_id, target_id, sess_id, cands, cand_count, remote_cands, &remote_cand_count);
                     KC_HPM_FD_CLOSE(ctrl_fd);
@@ -5030,7 +4835,8 @@ int kc_hpm_connect(
                             (unsigned long)time(NULL), (unsigned)(rand() & 0xFFFF));
                         
                         int temp_udp = kc_hpm_create_socket("0.0.0.0", 0);
-                        kc_hpm_gather_candidates(ctx, temp_udp, index_host, index_port, cands, KC_HPM_CANDIDATES_MAX, &cand_count);
+                        kc_hpm_gather_candidates(ctx, temp_udp, cands,
+                            KC_HPM_CANDIDATES_MAX, &cand_count);
                         
                         kc_hpm_send_punch_req_cands(ctrl_fd, self_id, target_id, sess_id, cands, cand_count, remote_cands, &remote_cand_count);
                         KC_HPM_FD_CLOSE(ctrl_fd);

@@ -1,6 +1,6 @@
 /**
  * hpm.h - HolePunchMan.
- * Summary: Public API for P2P tunnels via TCP control plane + UDP hole punch. Index server uses TCP for all control operations.
+ * Summary: Public API for TCP rendezvous control and direct peer UDP transport.
  *
  * Author:  KaisarCode
  * Website: https://kaisarcode.com
@@ -63,8 +63,6 @@ typedef struct kc_hpm_options {
 typedef struct {
     char id[KC_HPM_ID_MAX + 1];
     char key[KC_HPM_KEY_STR_SZ];
-    char addr[KC_HPM_ADDR_MAX + 1];
-    unsigned short port;
     time_t last_seen;
 } kc_hpm_peer_t;
 
@@ -108,7 +106,7 @@ int kc_hpm_is_valid_pass_token(const char *pass);
 /**
  * INDEX SERVER
  * Binds a TCP socket and enters a blocking loop handling
- * REGISTER / DEREGISTER / LIST / LOOKUP / PUNCH_REQ.
+ * REGISTER / DEREGISTER / LIST / LOOKUP / PUNCH_REQ2.
  * Never returns on success.
  * @return Negative error code on setup failure.
  */
@@ -120,7 +118,7 @@ unsigned short port
 
 /**
  * CLIENT: Publish a local service through the rendezvous index.
- * Connects to the index over TCP, REGISTERs, and waits for PUNCH_CALL
+ * Connects to the index over TCP, REGISTERs, and waits for PUNCH_CALL2
  * requests over the same TCP connection. Creates one backend session
  * per connecting client.
  * @return KC_HPM_OK on clean exit, or a negative error code.
@@ -135,9 +133,10 @@ unsigned short bind_port
 
 /**
  * CLIENT: Expose a remote service on a local port.
- * Uses TCP for LOOKUP + PUNCH_REQ to the index. For TCP data relay,
- * creates a local TCP listener and the server connects back. For UDP
- * data relay, creates a UDP socket and hole-punches to the server.
+ * Uses TCP for LOOKUP + PUNCH_REQ2 to the index. For TCP data relay,
+ * creates a local TCP listener and uses a direct peer UDP path for the
+ * encrypted reliable stream. For UDP data relay, creates a UDP socket
+ * and hole-punches directly to the publisher.
  * @return KC_HPM_OK on clean exit, or a negative error code.
  */
 int kc_hpm_connect(

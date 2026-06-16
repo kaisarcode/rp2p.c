@@ -1,6 +1,6 @@
 # hpm.c - HolePunchMan: General P2P communication
 
-`hpm.c` is a small C library and CLI for publishing local services through UDP-based peer connectivity mediated by a rendezvous index server, with direct hole punching by default and optional STUN-assisted discovery.
+`hpm.c` is a small and portable C library and CLI for exposing local TCP or UDP services over peer-to-peer connections.
 
 ---
 
@@ -137,7 +137,7 @@ printf 'ping' | socat - TCP:127.0.0.1:9000
 
 | Command | Description |
 | :--- | :--- |
-| `idx <port>` | Start an index server on the given TCP+UDP port. |
+| `idx <port>` | Start an index server on the given TCP control port. |
 | `idx <port> --max <N>` | Start an index server and limit announced hosts to `N`. |
 | `idx <port> --pow <N>` | Start an index server with PoW challenge of N bits (default 0). |
 | `set <host>@<index[:port]> --tcp <port> [--sweep <n>] [--stun <url>]` | Publish one local TCP backend on `127.0.0.1:<port>`. |
@@ -164,6 +164,10 @@ IDs cannot contain whitespace, `@`, or `:` because those characters conflict wit
 
 ### How the tunnel works
 
+The index is a **TCP-only control plane**.
+It handles registration, lookup, candidate exchange, and punch signaling.
+It does **not** bind UDP, perform NAT discovery, relay UDP, or carry application payload.
+
 The inter-peer data channel is **UDP-based**.
 By default it tries direct UDP hole punching first.
 In `--tcp` mode, HPM wraps that UDP path in an internal encrypted reliable stream so local TCP applications still see ordered, reconstructable, full-duplex byte semantics.
@@ -185,6 +189,8 @@ Any tool that speaks TCP or UDP works against the bridge without modification.
 STUN remains optional because it is an external resource.
 It does not relay or carry application payloads, it only helps peers learn which
 direct address and port to try for hole punching.
+STUN is performed by publishers and consumers against external STUN servers.
+The index is not a STUN server and does not observe or validate peer UDP endpoints.
 
 HPM does not support TURN-style fallback. TURN relays application traffic through
 a third party, which changes the model from direct peer-to-peer transport to
@@ -232,15 +238,15 @@ kc_hpm_close(ctx);
 ## Wire Protocol
 
 Index control messages are plain text over TCP. The inter-peer data channel is UDP-based regardless of the `--tcp`/`--udp` flag.
-UDP is used for NAT discovery (`NAT_CHECK`), hole-punch probes, keepalives, and direct payload transport. In `--tcp` mode, application bytes are carried inside HPM's own encrypted reliable stream frames over that UDP path.
+UDP is used only between peers for hole-punch probes, keepalives, and direct payload transport. In `--tcp` mode, application bytes are carried inside HPM's own encrypted reliable stream frames over that UDP path.
 
 | Request | Response |
 | :--- | :--- |
 | `REGISTER:id` | `CHALLENGE:nonce:bits` |
-| `REGISTER:id:SOLUTION:<hex>:PROOF:<hex>` | `OK:OBSERVED:addr:port:KEY:<hex>` or `AUTH_FAILED` |
+| `REGISTER:id:SOLUTION:<hex>:PROOF:<hex>` | `OK:KEY:<hex>` or `AUTH_FAILED` |
 | `DEREGISTER:id:KEY:<hex>` | `OK` |
-| `LIST` | `PEER:id:addr:port\n...END` |
-| `LOOKUP:id` | `PEER:id:addr:port` or `NOT_FOUND` |
+| `LIST` | `PEER:id\n...END` |
+| `LOOKUP:id` | `PEER:id` or `NOT_FOUND` |
 | `PUNCH_REQ2:me:target:session\nCAND:...\nEND` | `PUNCH_OK2:target:session\nCAND:...\nEND` to initiator |
 | forwarded by index | `PUNCH_CALL2:me:session\nCAND:...\nEND` to target |
 | `PUNCH_PING:...` | Direct peer STUN-like probe (UDP) |
@@ -291,7 +297,7 @@ The proof is always HMAC-SHA256 keyed by `HPM_PASS`. On a public index, `HPM_PAS
 I <- C: REGISTER:<self_id>
 I -> C: CHALLENGE:<nonce_hex>:<bits>
 I <- C: REGISTER:<self_id>:SOLUTION:<solution_hex>:PROOF:<proof_hex>
-I -> C: OK:OBSERVED:addr:port:KEY:<hex>
+I -> C: OK:KEY:<hex>
 ```
 
 ### CLI
@@ -359,6 +365,9 @@ kc_hpm_set_pass(ctx, "password");
 
 ## Notes
 
+- The index uses TCP only and can sit behind a TCP-only tunnel such as Cloudflare Tunnel, ngrok TCP, reverse SSH, or another TCP forwarder.
+- The index does not require a public UDP port.
+- The index does not relay application traffic.
 - The inter-peer transport is UDP-based and stays peer-to-peer.
 - `--tcp` now uses an internal encrypted reliable stream over UDP. Local service still communicates over TCP, but HPM handles ordering, retransmission, reconstruction, and payload encryption inside the tunnel.
 - `set --tcp <port>` connects to a real local TCP backend on `127.0.0.1:<port>`.

@@ -3480,16 +3480,25 @@ int kc_hpm_punch_select(kc_hpm_t *ctx, int sweep_limit, int udp_fd, const char *
                     char rx_sess[64] = {0};
                     char rx_from[KC_HPM_ID_MAX + 1] = {0};
                     char rx_to[KC_HPM_ID_MAX + 1] = {0};
+                    int is_ping = 0;
+                    int is_pong = 0;
 
                     recv_buf[n] = '\0';
-                    if ((sscanf(recv_buf, "PUNCH_PONG:%63[^:]:%63[^:]:%63s",
-                        rx_sess, rx_from, rx_to) == 3 ||
-                        sscanf(recv_buf, "PUNCH_PING:%63[^:]:%63[^:]:%63s",
-                        rx_sess, rx_from, rx_to) == 3) &&
-                        strcmp(rx_sess, session_id) == 0 &&
-                        strcmp(rx_from, to_id) == 0 && strcmp(rx_to, from_id) == 0) {
+                    is_pong = sscanf(recv_buf,
+                        "PUNCH_PONG:%63[^:]:%63[^:]:%63s",
+                        rx_sess, rx_from, rx_to) == 3;
+                    if (!is_pong) {
+                        is_ping = sscanf(recv_buf,
+                            "PUNCH_PING:%63[^:]:%63[^:]:%63s",
+                            rx_sess, rx_from, rx_to) == 3;
+                    }
+                    if (((is_ping && strcmp(rx_from, to_id) == 0 &&
+                        strcmp(rx_to, from_id) == 0) ||
+                        (is_pong && strcmp(rx_from, from_id) == 0 &&
+                        strcmp(rx_to, to_id) == 0)) &&
+                        strcmp(rx_sess, session_id) == 0) {
                         *selected_addr = src_addr;
-                        if (strncmp(recv_buf, "PUNCH_PING:", 11) == 0) {
+                        if (is_ping) {
                             char pong_msg[256];
                             snprintf(pong_msg, sizeof(pong_msg), "PUNCH_PONG:%s:%s:%s\n", session_id, to_id, from_id);
                             sendto(udp_fd, pong_msg, strlen(pong_msg), 0, (struct sockaddr *)&src_addr, sizeof(src_addr));
@@ -3542,16 +3551,25 @@ int kc_hpm_punch_select(kc_hpm_t *ctx, int sweep_limit, int udp_fd, const char *
                         char rx_sess[64] = {0};
                         char rx_from[KC_HPM_ID_MAX + 1] = {0};
                         char rx_to[KC_HPM_ID_MAX + 1] = {0};
+                        int is_ping = 0;
+                        int is_pong = 0;
 
                         recv_buf[n] = '\0';
-                        if ((sscanf(recv_buf, "PUNCH_PONG:%63[^:]:%63[^:]:%63s",
-                            rx_sess, rx_from, rx_to) == 3 ||
-                            sscanf(recv_buf, "PUNCH_PING:%63[^:]:%63[^:]:%63s",
-                            rx_sess, rx_from, rx_to) == 3) &&
-                            strcmp(rx_sess, session_id) == 0 &&
-                            strcmp(rx_from, to_id) == 0 && strcmp(rx_to, from_id) == 0) {
+                        is_pong = sscanf(recv_buf,
+                            "PUNCH_PONG:%63[^:]:%63[^:]:%63s",
+                            rx_sess, rx_from, rx_to) == 3;
+                        if (!is_pong) {
+                            is_ping = sscanf(recv_buf,
+                                "PUNCH_PING:%63[^:]:%63[^:]:%63s",
+                                rx_sess, rx_from, rx_to) == 3;
+                        }
+                        if (((is_ping && strcmp(rx_from, to_id) == 0 &&
+                            strcmp(rx_to, from_id) == 0) ||
+                            (is_pong && strcmp(rx_from, from_id) == 0 &&
+                            strcmp(rx_to, to_id) == 0)) &&
+                            strcmp(rx_sess, session_id) == 0) {
                             *selected_addr = src_addr;
-                            if (strncmp(recv_buf, "PUNCH_PING:", 11) == 0) {
+                            if (is_ping) {
                                 char pong_msg[256];
                                 snprintf(pong_msg, sizeof(pong_msg), "PUNCH_PONG:%s:%s:%s\n", session_id, to_id, from_id);
                                 sendto(udp_fd, pong_msg, strlen(pong_msg), 0, (struct sockaddr *)&src_addr, sizeof(src_addr));

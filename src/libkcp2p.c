@@ -1,5 +1,5 @@
 /**
- * libhpm.c - HolePunchMan.
+ * libkcp2p.c - KaisarCode P2P.
  * Summary: Core shared library. TCP rendezvous control and direct P2P UDP relay.
  *
  * Author:  KaisarCode
@@ -11,7 +11,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
-#include "hpm.h"
+#include "p2p.h"
 #include "monocypher.h"
 
 #include <errno.h>
@@ -40,12 +40,12 @@
 #  ifndef write
 #  define write(fd,buf,sz) _write(fd,buf,sz)
 #  endif
-typedef SOCKET kc_hpm_fd_t;
-#  define KC_HPM_FD_INVALID  INVALID_SOCKET
-#  define KC_HPM_FD_CLOSE(f) closesocket(f)
-#  define KC_HPM_ISERR(f)    ((f) == INVALID_SOCKET)
-#  define KC_HPM_LASTERR()   ((int)WSAGetLastError())
-#  define KC_HPM_EWOULD      WSAEWOULDBLOCK
+typedef SOCKET kc_p2p_fd_t;
+#  define KC_P2P_FD_INVALID  INVALID_SOCKET
+#  define KC_P2P_FD_CLOSE(f) closesocket(f)
+#  define KC_P2P_ISERR(f)    ((f) == INVALID_SOCKET)
+#  define KC_P2P_LASTERR()   ((int)WSAGetLastError())
+#  define KC_P2P_EWOULD      WSAEWOULDBLOCK
 #else
 #  include <sys/select.h>
 #  include <sys/socket.h>
@@ -59,55 +59,55 @@ typedef SOCKET kc_hpm_fd_t;
 #  include <sys/stat.h>
 #  include <pthread.h>
 #  include <sys/types.h>
-typedef int kc_hpm_fd_t;
-#  define KC_HPM_FD_INVALID  (-1)
-#  define KC_HPM_FD_CLOSE(f) close(f)
-#  define KC_HPM_ISERR(f)    ((f) < 0)
-#  define KC_HPM_LASTERR()   errno
-#  define KC_HPM_EWOULD      EAGAIN
+typedef int kc_p2p_fd_t;
+#  define KC_P2P_FD_INVALID  (-1)
+#  define KC_P2P_FD_CLOSE(f) close(f)
+#  define KC_P2P_ISERR(f)    ((f) < 0)
+#  define KC_P2P_LASTERR()   errno
+#  define KC_P2P_EWOULD      EAGAIN
 #  define INVALID_SOCKET     (-1)
 #  define SOCKET_ERROR       (-1)
 #endif
 
-#define KC_HPM_ETIMEOUT_SEC     15
-#define KC_HPM_HALFCLOSE_S       2
-#define KC_HPM_DISCONNECT_S     10
-#define KC_HPM_KEEPALIVE_S       3
-#define KC_HPM_PUNCH_ATTEMPTS   10
-#define KC_HPM_PUNCH_INTERVAL_MS 200
-#define KC_HPM_CANDIDATES_MAX       16
-#define KC_HPM_MAX_PENDING_PUNCHES  32
-#define KC_HPM_POW_CHALLENGES_MAX 256
-#define KC_HPM_STREAM_MAGIC      0x48535452u
-#define KC_HPM_STREAM_VERSION    1u
-#define KC_HPM_STREAM_SESSION_ID_SZ 16
-#define KC_HPM_STREAM_HELLO_NONCE_SZ 16
-#define KC_HPM_STREAM_KEY_SZ     32
-#define KC_HPM_STREAM_TAG_SZ     16
-#define KC_HPM_STREAM_NONCE_SZ   24
-#define KC_HPM_STREAM_MAX_PAYLOAD 1024
-#define KC_HPM_STREAM_MAX_FRAME  1400
-#define KC_HPM_STREAM_SEND_WINDOW 64
-#define KC_HPM_STREAM_RECV_WINDOW 64
-#define KC_HPM_STREAM_RTO_MS     700
-#define KC_HPM_STREAM_ACK_MS     120
-#define KC_HPM_STREAM_HELLO_MS   500
-#define KC_HPM_STREAM_IDLE_MS    20000
-#define KC_HPM_STREAM_MAX_RETRIES 12
+#define KC_P2P_ETIMEOUT_SEC     15
+#define KC_P2P_HALFCLOSE_S       2
+#define KC_P2P_DISCONNECT_S     10
+#define KC_P2P_KEEPALIVE_S       3
+#define KC_P2P_PUNCH_ATTEMPTS   10
+#define KC_P2P_PUNCH_INTERVAL_MS 200
+#define KC_P2P_CANDIDATES_MAX       16
+#define KC_P2P_MAX_PENDING_PUNCHES  32
+#define KC_P2P_POW_CHALLENGES_MAX 256
+#define KC_P2P_STREAM_MAGIC      0x48535452u
+#define KC_P2P_STREAM_VERSION    1u
+#define KC_P2P_STREAM_SESSION_ID_SZ 16
+#define KC_P2P_STREAM_HELLO_NONCE_SZ 16
+#define KC_P2P_STREAM_KEY_SZ     32
+#define KC_P2P_STREAM_TAG_SZ     16
+#define KC_P2P_STREAM_NONCE_SZ   24
+#define KC_P2P_STREAM_MAX_PAYLOAD 1024
+#define KC_P2P_STREAM_MAX_FRAME  1400
+#define KC_P2P_STREAM_SEND_WINDOW 64
+#define KC_P2P_STREAM_RECV_WINDOW 64
+#define KC_P2P_STREAM_RTO_MS     700
+#define KC_P2P_STREAM_ACK_MS     120
+#define KC_P2P_STREAM_HELLO_MS   500
+#define KC_P2P_STREAM_IDLE_MS    20000
+#define KC_P2P_STREAM_MAX_RETRIES 12
 
-#define KC_HPM_STREAM_TYPE_HELLO     1u
-#define KC_HPM_STREAM_TYPE_HELLO_ACK 2u
-#define KC_HPM_STREAM_TYPE_DATA      3u
-#define KC_HPM_STREAM_TYPE_ACK       4u
-#define KC_HPM_STREAM_TYPE_SACK      5u
-#define KC_HPM_STREAM_TYPE_FIN       6u
-#define KC_HPM_STREAM_TYPE_FIN_ACK   7u
-#define KC_HPM_STREAM_TYPE_RESET     8u
-#define KC_HPM_STREAM_TYPE_PING      9u
-#define KC_HPM_STREAM_TYPE_PONG      10u
+#define KC_P2P_STREAM_TYPE_HELLO     1u
+#define KC_P2P_STREAM_TYPE_HELLO_ACK 2u
+#define KC_P2P_STREAM_TYPE_DATA      3u
+#define KC_P2P_STREAM_TYPE_ACK       4u
+#define KC_P2P_STREAM_TYPE_SACK      5u
+#define KC_P2P_STREAM_TYPE_FIN       6u
+#define KC_P2P_STREAM_TYPE_FIN_ACK   7u
+#define KC_P2P_STREAM_TYPE_RESET     8u
+#define KC_P2P_STREAM_TYPE_PING      9u
+#define KC_P2P_STREAM_TYPE_PONG      10u
 
-#define KC_HPM_STREAM_DIR_C2S    1u
-#define KC_HPM_STREAM_DIR_S2C    2u
+#define KC_P2P_STREAM_DIR_C2S    1u
+#define KC_P2P_STREAM_DIR_S2C    2u
 
 typedef struct {
     uint8_t type;
@@ -118,8 +118,8 @@ typedef struct {
     uint16_t payload_len;
     uint32_t gap_start;
     uint32_t gap_end;
-    unsigned char session_id[KC_HPM_STREAM_SESSION_ID_SZ];
-} kc_hpm_stream_header_t;
+    unsigned char session_id[KC_P2P_STREAM_SESSION_ID_SZ];
+} kc_p2p_stream_header_t;
 
 typedef struct {
     int used;
@@ -128,19 +128,19 @@ typedef struct {
     int attempts;
     uint64_t last_tx_ms;
     size_t frame_len;
-    unsigned char frame[KC_HPM_STREAM_MAX_FRAME];
-} kc_hpm_stream_send_slot_t;
+    unsigned char frame[KC_P2P_STREAM_MAX_FRAME];
+} kc_p2p_stream_send_slot_t;
 
-#ifndef KC_HPM_BUILD_VERSION
-#define KC_HPM_BUILD_VERSION 0
+#ifndef KC_P2P_BUILD_VERSION
+#define KC_P2P_BUILD_VERSION 0
 #endif
 
 /**
  * Returns the build version generated at compile time.
  * @return Unix timestamp for the current build.
  */
-uint64_t kc_hpm_version(void) {
-    return (uint64_t)KC_HPM_BUILD_VERSION;
+uint64_t kc_p2p_version(void) {
+    return (uint64_t)KC_P2P_BUILD_VERSION;
 }
 
 typedef struct {
@@ -148,34 +148,34 @@ typedef struct {
     uint8_t type;
     uint32_t seq;
     uint16_t len;
-    unsigned char data[KC_HPM_STREAM_MAX_PAYLOAD];
-} kc_hpm_stream_recv_slot_t;
+    unsigned char data[KC_P2P_STREAM_MAX_PAYLOAD];
+} kc_p2p_stream_recv_slot_t;
 
 typedef struct {
     int ready;
     unsigned char local_secret[32];
     unsigned char local_public[32];
     unsigned char peer_public[32];
-    unsigned char local_nonce[KC_HPM_STREAM_HELLO_NONCE_SZ];
-    unsigned char peer_nonce[KC_HPM_STREAM_HELLO_NONCE_SZ];
-    unsigned char tx_key[KC_HPM_STREAM_KEY_SZ];
-    unsigned char rx_key[KC_HPM_STREAM_KEY_SZ];
-} kc_hpm_stream_crypto_t;
+    unsigned char local_nonce[KC_P2P_STREAM_HELLO_NONCE_SZ];
+    unsigned char peer_nonce[KC_P2P_STREAM_HELLO_NONCE_SZ];
+    unsigned char tx_key[KC_P2P_STREAM_KEY_SZ];
+    unsigned char rx_key[KC_P2P_STREAM_KEY_SZ];
+} kc_p2p_stream_crypto_t;
 
 typedef struct {
     uint32_t next_seq;
     int fin_sent;
     int fin_acked;
     int local_eof;
-    kc_hpm_stream_send_slot_t slots[KC_HPM_STREAM_SEND_WINDOW];
-} kc_hpm_stream_outbound_t;
+    kc_p2p_stream_send_slot_t slots[KC_P2P_STREAM_SEND_WINDOW];
+} kc_p2p_stream_outbound_t;
 
 typedef struct {
     uint32_t next_expected;
     int remote_fin;
     int remote_fin_acked;
-    kc_hpm_stream_recv_slot_t slots[KC_HPM_STREAM_RECV_WINDOW];
-} kc_hpm_stream_inbound_t;
+    kc_p2p_stream_recv_slot_t slots[KC_P2P_STREAM_RECV_WINDOW];
+} kc_p2p_stream_inbound_t;
 
 typedef struct {
     int enabled;
@@ -189,40 +189,40 @@ typedef struct {
     uint8_t tx_direction;
     uint8_t rx_direction;
     uint32_t ctrl_seq;
-    unsigned char session_id[KC_HPM_STREAM_SESSION_ID_SZ];
-    char session_hex[KC_HPM_STREAM_SESSION_ID_SZ * 2 + 1];
-    kc_hpm_stream_crypto_t crypto;
-    kc_hpm_stream_outbound_t out;
-    kc_hpm_stream_inbound_t in;
+    unsigned char session_id[KC_P2P_STREAM_SESSION_ID_SZ];
+    char session_hex[KC_P2P_STREAM_SESSION_ID_SZ * 2 + 1];
+    kc_p2p_stream_crypto_t crypto;
+    kc_p2p_stream_outbound_t out;
+    kc_p2p_stream_inbound_t in;
     uint64_t last_rx_ms;
     uint64_t last_tx_ms;
     uint64_t last_ack_ms;
     uint64_t last_hello_ms;
-} kc_hpm_stream_state_t;
+} kc_p2p_stream_state_t;
 
 typedef struct {
     int used;
-    unsigned char session_id[KC_HPM_STREAM_SESSION_ID_SZ];
+    unsigned char session_id[KC_P2P_STREAM_SESSION_ID_SZ];
     uint32_t seq;
-} kc_hpm_stream_drop_record_t;
+} kc_p2p_stream_drop_record_t;
 
 typedef struct {
     int used;
     size_t len;
-    unsigned char frame[KC_HPM_STREAM_MAX_FRAME];
-} kc_hpm_stream_pending_frame_t;
+    unsigned char frame[KC_P2P_STREAM_MAX_FRAME];
+} kc_p2p_stream_pending_frame_t;
 
-volatile sig_atomic_t kc_hpm_stop_requested = 0;
+volatile sig_atomic_t kc_p2p_stop_requested = 0;
 
-static kc_hpm_t *g_signal_ctx = NULL;
+static kc_p2p_t *g_signal_ctx = NULL;
 
 typedef struct {
     uint32_t state[8];
     uint64_t count;
     unsigned char buf[64];
-} kc_hpm_sha256_t;
+} kc_p2p_sha256_t;
 
-static const uint32_t kc_hpm_sha256_k[64] = {
+static const uint32_t kc_p2p_sha256_k[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
     0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
@@ -241,13 +241,13 @@ static const uint32_t kc_hpm_sha256_k[64] = {
     0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
 };
 
-#define KC_HPM_SHA256_ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
-#define KC_HPM_SHA256_CH(x, y, z) (((x) & (y)) ^ (~(x) & (z)))
-#define KC_HPM_SHA256_MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
-#define KC_HPM_SHA256_S0(x) (KC_HPM_SHA256_ROR(x, 2) ^ KC_HPM_SHA256_ROR(x, 13) ^ KC_HPM_SHA256_ROR(x, 22))
-#define KC_HPM_SHA256_S1(x) (KC_HPM_SHA256_ROR(x, 6) ^ KC_HPM_SHA256_ROR(x, 11) ^ KC_HPM_SHA256_ROR(x, 25))
-#define KC_HPM_SHA256_s0(x) (KC_HPM_SHA256_ROR(x, 7) ^ KC_HPM_SHA256_ROR(x, 18) ^ ((x) >> 3))
-#define KC_HPM_SHA256_s1(x) (KC_HPM_SHA256_ROR(x, 17) ^ KC_HPM_SHA256_ROR(x, 19) ^ ((x) >> 10))
+#define KC_P2P_SHA256_ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+#define KC_P2P_SHA256_CH(x, y, z) (((x) & (y)) ^ (~(x) & (z)))
+#define KC_P2P_SHA256_MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
+#define KC_P2P_SHA256_S0(x) (KC_P2P_SHA256_ROR(x, 2) ^ KC_P2P_SHA256_ROR(x, 13) ^ KC_P2P_SHA256_ROR(x, 22))
+#define KC_P2P_SHA256_S1(x) (KC_P2P_SHA256_ROR(x, 6) ^ KC_P2P_SHA256_ROR(x, 11) ^ KC_P2P_SHA256_ROR(x, 25))
+#define KC_P2P_SHA256_s0(x) (KC_P2P_SHA256_ROR(x, 7) ^ KC_P2P_SHA256_ROR(x, 18) ^ ((x) >> 3))
+#define KC_P2P_SHA256_s1(x) (KC_P2P_SHA256_ROR(x, 17) ^ KC_P2P_SHA256_ROR(x, 19) ^ ((x) >> 10))
 
 /**
  * sha256 transform.
@@ -258,7 +258,7 @@ static const uint32_t kc_hpm_sha256_k[64] = {
  * Sha256 transform.
  * @return Status code.
  */
-static void kc_hpm_sha256_transform(uint32_t state[8], const unsigned char block[64]) {
+static void kc_p2p_sha256_transform(uint32_t state[8], const unsigned char block[64]) {
     uint32_t W[64], a, b, c, d, e, f, g, h, T1, T2;
     int t;
     for (t = 0; t < 16; t++)
@@ -267,12 +267,12 @@ static void kc_hpm_sha256_transform(uint32_t state[8], const unsigned char block
             ((uint32_t)block[t*4+2]) << 8 |
             block[t*4+3];
     for (t = 16; t < 64; t++)
-        W[t] = KC_HPM_SHA256_s1(W[t-2]) + W[t-7] + KC_HPM_SHA256_s0(W[t-15]) + W[t-16];
+        W[t] = KC_P2P_SHA256_s1(W[t-2]) + W[t-7] + KC_P2P_SHA256_s0(W[t-15]) + W[t-16];
     a = state[0]; b = state[1]; c = state[2]; d = state[3];
     e = state[4]; f = state[5]; g = state[6]; h = state[7];
     for (t = 0; t < 64; t++) {
-        T1 = h + KC_HPM_SHA256_S1(e) + KC_HPM_SHA256_CH(e, f, g) + kc_hpm_sha256_k[t] + W[t];
-        T2 = KC_HPM_SHA256_S0(a) + KC_HPM_SHA256_MAJ(a, b, c);
+        T1 = h + KC_P2P_SHA256_S1(e) + KC_P2P_SHA256_CH(e, f, g) + kc_p2p_sha256_k[t] + W[t];
+        T2 = KC_P2P_SHA256_S0(a) + KC_P2P_SHA256_MAJ(a, b, c);
         h = g; g = f; f = e; e = d + T1; d = c; c = b; b = a; a = T1 + T2;
     }
     state[0] += a; state[1] += b; state[2] += c; state[3] += d;
@@ -288,7 +288,7 @@ static void kc_hpm_sha256_transform(uint32_t state[8], const unsigned char block
  * Sha256 init.
  * @return Status code.
  */
-static void kc_hpm_sha256_init(kc_hpm_sha256_t *ctx) {
+static void kc_p2p_sha256_init(kc_p2p_sha256_t *ctx) {
     ctx->state[0] = 0x6a09e667; ctx->state[1] = 0xbb67ae85;
     ctx->state[2] = 0x3c6ef372; ctx->state[3] = 0xa54ff53a;
     ctx->state[4] = 0x510e527f; ctx->state[5] = 0x9b05688c;
@@ -305,13 +305,13 @@ static void kc_hpm_sha256_init(kc_hpm_sha256_t *ctx) {
  * Sha256 update.
  * @return Status code.
  */
-static void kc_hpm_sha256_update(kc_hpm_sha256_t *ctx, const unsigned char *data, size_t len) {
+static void kc_p2p_sha256_update(kc_p2p_sha256_t *ctx, const unsigned char *data, size_t len) {
     size_t i;
     for (i = 0; i < len; i++) {
         ctx->buf[ctx->count & 63] = data[i];
         ctx->count++;
         if ((ctx->count & 63) == 0)
-            kc_hpm_sha256_transform(ctx->state, ctx->buf);
+            kc_p2p_sha256_transform(ctx->state, ctx->buf);
     }
 }
 
@@ -324,13 +324,13 @@ static void kc_hpm_sha256_update(kc_hpm_sha256_t *ctx, const unsigned char *data
  * Sha256 final.
  * @return Status code.
  */
-static void kc_hpm_sha256_final(kc_hpm_sha256_t *ctx, unsigned char hash[32]) {
+static void kc_p2p_sha256_final(kc_p2p_sha256_t *ctx, unsigned char hash[32]) {
     uint64_t bits = ctx->count * 8;
     int idx = (int)(ctx->count & 63);
     ctx->buf[idx++] = 0x80;
     if (idx > 56) {
         while (idx < 64) ctx->buf[idx++] = 0;
-        kc_hpm_sha256_transform(ctx->state, ctx->buf);
+        kc_p2p_sha256_transform(ctx->state, ctx->buf);
         idx = 0;
     }
     while (idx < 56) ctx->buf[idx++] = 0;
@@ -342,16 +342,16 @@ static void kc_hpm_sha256_final(kc_hpm_sha256_t *ctx, unsigned char hash[32]) {
     ctx->buf[61] = (unsigned char)(bits >> 16);
     ctx->buf[62] = (unsigned char)(bits >> 8);
     ctx->buf[63] = (unsigned char)(bits);
-    kc_hpm_sha256_transform(ctx->state, ctx->buf);
+    kc_p2p_sha256_transform(ctx->state, ctx->buf);
     memcpy(hash, ctx->state, 32);
 }
 
 typedef struct {
     char nonce_hex[17];
-    char id[KC_HPM_ID_MAX + 1];
+    char id[KC_P2P_ID_MAX + 1];
     struct sockaddr_in addr;
     time_t issued_at;
-} kc_hpm_pow_challenge_t;
+} kc_p2p_pow_challenge_t;
 
 /**
  * Computes one HMAC-SHA256 digest.
@@ -361,10 +361,10 @@ typedef struct {
  * @param hash    Output digest buffer.
  * @return None.
  */
-static void kc_hpm_hmac_sha256(const char *key, const unsigned char *msg,
+static void kc_p2p_hmac_sha256(const char *key, const unsigned char *msg,
     size_t msg_len, unsigned char hash[32])
 {
-    kc_hpm_sha256_t ctx;
+    kc_p2p_sha256_t ctx;
     unsigned char key_block[64];
     unsigned char ipad[64];
     unsigned char opad[64];
@@ -375,9 +375,9 @@ static void kc_hpm_hmac_sha256(const char *key, const unsigned char *msg,
     memset(key_block, 0, sizeof(key_block));
     key_len = key ? strlen(key) : 0;
     if (key_len > sizeof(key_block)) {
-        kc_hpm_sha256_init(&ctx);
-        kc_hpm_sha256_update(&ctx, (const unsigned char *)key, key_len);
-        kc_hpm_sha256_final(&ctx, key_block);
+        kc_p2p_sha256_init(&ctx);
+        kc_p2p_sha256_update(&ctx, (const unsigned char *)key, key_len);
+        kc_p2p_sha256_final(&ctx, key_block);
     } else if (key_len > 0) {
         memcpy(key_block, key, key_len);
     }
@@ -385,14 +385,14 @@ static void kc_hpm_hmac_sha256(const char *key, const unsigned char *msg,
         ipad[i] = (unsigned char)(key_block[i] ^ 0x36);
         opad[i] = (unsigned char)(key_block[i] ^ 0x5c);
     }
-    kc_hpm_sha256_init(&ctx);
-    kc_hpm_sha256_update(&ctx, ipad, sizeof(ipad));
-    kc_hpm_sha256_update(&ctx, msg, msg_len);
-    kc_hpm_sha256_final(&ctx, inner);
-    kc_hpm_sha256_init(&ctx);
-    kc_hpm_sha256_update(&ctx, opad, sizeof(opad));
-    kc_hpm_sha256_update(&ctx, inner, sizeof(inner));
-    kc_hpm_sha256_final(&ctx, hash);
+    kc_p2p_sha256_init(&ctx);
+    kc_p2p_sha256_update(&ctx, ipad, sizeof(ipad));
+    kc_p2p_sha256_update(&ctx, msg, msg_len);
+    kc_p2p_sha256_final(&ctx, inner);
+    kc_p2p_sha256_init(&ctx);
+    kc_p2p_sha256_update(&ctx, opad, sizeof(opad));
+    kc_p2p_sha256_update(&ctx, inner, sizeof(inner));
+    kc_p2p_sha256_final(&ctx, hash);
 }
 
 /**
@@ -404,10 +404,10 @@ static void kc_hpm_hmac_sha256(const char *key, const unsigned char *msg,
  * @param hash         Output digest buffer.
  * @return None.
  */
-static void kc_hpm_hash_register_once(const char *pass, const char *nonce_hex,
+static void kc_p2p_hash_register_once(const char *pass, const char *nonce_hex,
     const char *id, const char *solution_hex, unsigned char hash[32])
 {
-    unsigned char msg[KC_HPM_ID_MAX + 33];
+    unsigned char msg[KC_P2P_ID_MAX + 33];
     size_t nonce_len;
     size_t id_len;
     size_t solution_len;
@@ -426,7 +426,7 @@ static void kc_hpm_hash_register_once(const char *pass, const char *nonce_hex,
     if (solution_len > sizeof(msg) - pos) solution_len = sizeof(msg) - pos;
     memcpy(msg + pos, solution_hex, solution_len);
     pos += solution_len;
-    kc_hpm_hmac_sha256(pass ? pass : "", msg, pos, hash);
+    kc_p2p_hmac_sha256(pass ? pass : "", msg, pos, hash);
 }
 
 /**
@@ -437,7 +437,7 @@ static void kc_hpm_hash_register_once(const char *pass, const char *nonce_hex,
  * @param out_cap  Output buffer capacity.
  * @return 1 on success, 0 on failure.
  */
-static int kc_hpm_hex_encode(const unsigned char *hash, size_t hash_len,
+static int kc_p2p_hex_encode(const unsigned char *hash, size_t hash_len,
     char *out, size_t out_cap)
 {
     static const char hex[] = "0123456789abcdef";
@@ -457,7 +457,7 @@ static int kc_hpm_hex_encode(const unsigned char *hash, size_t hash_len,
  * @param hash Input digest bytes.
  * @return Count of leading zero bits.
  */
-static int kc_hpm_count_leading_zero_bits(const unsigned char hash[32]);
+static int kc_p2p_count_leading_zero_bits(const unsigned char hash[32]);
 
 /**
  * Solves one register proof challenge.
@@ -471,7 +471,7 @@ static int kc_hpm_count_leading_zero_bits(const unsigned char hash[32]);
  * @param proof_cap    Output proof capacity.
  * @return 1 on success, 0 on failure.
  */
-static int kc_hpm_solve_register_pow(const char *pass, const char *nonce_hex,
+static int kc_p2p_solve_register_pow(const char *pass, const char *nonce_hex,
     const char *id, int bits, char *solution_hex, size_t sol_cap,
     char *proof_hex, size_t proof_cap)
 {
@@ -483,14 +483,14 @@ static int kc_hpm_solve_register_pow(const char *pass, const char *nonce_hex,
     counter = 0;
     for (;;) {
         snprintf(buf, sizeof(buf), "%08x", counter);
-        kc_hpm_hash_register_once(pass, nonce_hex, id, buf, hash);
-        if (kc_hpm_count_leading_zero_bits(hash) >= bits) {
+        kc_p2p_hash_register_once(pass, nonce_hex, id, buf, hash);
+        if (kc_p2p_count_leading_zero_bits(hash) >= bits) {
             memcpy(solution_hex, buf, sizeof(buf));
-            return kc_hpm_hex_encode(hash, sizeof(hash), proof_hex, proof_cap);
+            return kc_p2p_hex_encode(hash, sizeof(hash), proof_hex, proof_cap);
         }
         counter++;
         if (counter == 0) break;
-        if ((counter & 0xfffff) == 0 && kc_hpm_stop_requested) break;
+        if ((counter & 0xfffff) == 0 && kc_p2p_stop_requested) break;
     }
     return 0;
 }
@@ -505,17 +505,17 @@ static int kc_hpm_solve_register_pow(const char *pass, const char *nonce_hex,
  * @param bits         Difficulty target.
  * @return 1 on success, 0 on failure.
  */
-static int kc_hpm_verify_register_pow(const char *pass, const char *nonce_hex,
+static int kc_p2p_verify_register_pow(const char *pass, const char *nonce_hex,
     const char *id, const char *solution_hex, const char *proof_hex, int bits)
 {
     unsigned char hash[32];
     char expected[65];
 
     if (!proof_hex || strlen(proof_hex) != 64) return 0;
-    kc_hpm_hash_register_once(pass, nonce_hex, id, solution_hex, hash);
-    if (!kc_hpm_hex_encode(hash, sizeof(hash), expected, sizeof(expected))) return 0;
+    kc_p2p_hash_register_once(pass, nonce_hex, id, solution_hex, hash);
+    if (!kc_p2p_hex_encode(hash, sizeof(hash), expected, sizeof(expected))) return 0;
     if (strcmp(proof_hex, expected) != 0) return 0;
-    return kc_hpm_count_leading_zero_bits(hash) >= bits;
+    return kc_p2p_count_leading_zero_bits(hash) >= bits;
 }
 
 /**
@@ -523,7 +523,7 @@ static int kc_hpm_verify_register_pow(const char *pass, const char *nonce_hex,
  * @param hash Input digest bytes.
  * @return Count of leading zero bits.
  */
-static int kc_hpm_count_leading_zero_bits(const unsigned char hash[32]) {
+static int kc_p2p_count_leading_zero_bits(const unsigned char hash[32]) {
     int total = 0, i;
     for (i = 0; i < 32; i++) {
         if (hash[i] == 0) {
@@ -543,52 +543,52 @@ static int kc_hpm_count_leading_zero_bits(const unsigned char hash[32]) {
 }
 
 typedef struct {
-    kc_hpm_fd_t fd;
-    char buf[KC_HPM_BUF];
+    kc_p2p_fd_t fd;
+    char buf[KC_P2P_BUF];
     int buf_len;
-    char id[KC_HPM_ID_MAX + 1];
+    char id[KC_P2P_ID_MAX + 1];
     int registered;
-} kc_hpm_tcp_conn_t;
+} kc_p2p_tcp_conn_t;
 
 typedef struct {
-    char id[KC_HPM_ID_MAX + 1];
-    char pass[KC_HPM_PASS_MAX + 1];
-} kc_hpm_vip_entry_t;
+    char id[KC_P2P_ID_MAX + 1];
+    char pass[KC_P2P_PASS_MAX + 1];
+} kc_p2p_vip_entry_t;
 
 /**
  * Pending punch.
  * Summary: Tracks a two-round punch request awaiting ACK2 from publisher.
  */
 typedef struct {
-    char self_id[KC_HPM_ID_MAX + 1];
-    char target_id[KC_HPM_ID_MAX + 1];
+    char self_id[KC_P2P_ID_MAX + 1];
+    char target_id[KC_P2P_ID_MAX + 1];
     char sess_id[64];
-    kc_hpm_fd_t consumer_fd;
+    kc_p2p_fd_t consumer_fd;
     time_t ts;
-} kc_hpm_pending_punch_t;
+} kc_p2p_pending_punch_t;
 
-struct kc_hpm {
-    kc_hpm_signal_entry_t *signal_entries;
+struct kc_p2p {
+    kc_p2p_signal_entry_t *signal_entries;
     int signal_count;
     int signal_capacity;
-    kc_hpm_peer_t *peers;
+    kc_p2p_peer_t *peers;
     int n_peers;
     int peers_alloc;
     int n_peers_cap;
     int nonvip_cap;
-    kc_hpm_tcp_conn_t *conns;
+    kc_p2p_tcp_conn_t *conns;
     int n_conns;
     int conns_cap;
-    kc_hpm_vip_entry_t *vips;
+    kc_p2p_vip_entry_t *vips;
     int n_vips;
     int vips_cap;
-    char key[KC_HPM_KEY_STR_SZ];
-    char pass[KC_HPM_PASS_MAX + 1];
+    char key[KC_P2P_KEY_STR_SZ];
+    char pass[KC_P2P_PASS_MAX + 1];
     int pow_bits;
     unsigned short bind_port;
     int proto;
     int sweep;
-    kc_hpm_pow_challenge_t pow_challenges[KC_HPM_POW_CHALLENGES_MAX];
+    kc_p2p_pow_challenge_t pow_challenges[KC_P2P_POW_CHALLENGES_MAX];
     int n_pow_challenges;
 #ifdef _WIN32
     CRITICAL_SECTION mutex;
@@ -596,63 +596,63 @@ struct kc_hpm {
     pthread_mutex_t mutex;
 #endif
     char stun_url[512];
-    kc_hpm_pending_punch_t pending_punches[KC_HPM_MAX_PENDING_PUNCHES];
+    kc_p2p_pending_punch_t pending_punches[KC_P2P_MAX_PENDING_PUNCHES];
     int n_pending_punches;
 };
 
-typedef struct kc_hpm_udp_consumer_session {
-    kc_hpm_fd_t fd;
-    kc_hpm_fd_t tcp_fd;
+typedef struct kc_p2p_udp_consumer_session {
+    kc_p2p_fd_t fd;
+    kc_p2p_fd_t tcp_fd;
     struct sockaddr_in client_addr;
     struct sockaddr_in peer_addr;
     time_t last_rx;
     time_t last_ka;
     int active;
     int is_tcp;
-    kc_hpm_stream_state_t stream;
-} kc_hpm_udp_consumer_session_t;
+    kc_p2p_stream_state_t stream;
+} kc_p2p_udp_consumer_session_t;
 
-typedef struct kc_hpm_udp_server_session {
-    kc_hpm_fd_t backend_fd;
-    kc_hpm_fd_t tcp_fd;
+typedef struct kc_p2p_udp_server_session {
+    kc_p2p_fd_t backend_fd;
+    kc_p2p_fd_t tcp_fd;
     struct sockaddr_in peer_addr;
     time_t last_rx;
     time_t last_ka;
     int active;
     int is_tcp;
-    kc_hpm_stream_state_t stream;
-} kc_hpm_udp_server_session_t;
+    kc_p2p_stream_state_t stream;
+} kc_p2p_udp_server_session_t;
 
 #ifdef _WIN32
-typedef HANDLE kc_hpm_thread_t;
-#define KC_HPM_THREAD_RET unsigned __stdcall
+typedef HANDLE kc_p2p_thread_t;
+#define KC_P2P_THREAD_RET unsigned __stdcall
 #else
-typedef pthread_t kc_hpm_thread_t;
-#define KC_HPM_THREAD_RET void *
+typedef pthread_t kc_p2p_thread_t;
+#define KC_P2P_THREAD_RET void *
 #endif
 
-static int kc_hpm_sock_read(kc_hpm_fd_t fd, char *buf, int len);
-static int kc_hpm_write_all(kc_hpm_fd_t fd, const char *buf, int len);
-static void kc_hpm_shutdown_write(kc_hpm_fd_t fd);
-static int kc_hpm_is_space(char ch);
-static char *kc_hpm_trim(char *text);
-static int kc_hpm_find_vip(kc_hpm_t *ctx, const char *id);
-static int kc_hpm_add_vip(kc_hpm_t *ctx, const char *id, const char *pass,
+static int kc_p2p_sock_read(kc_p2p_fd_t fd, char *buf, int len);
+static int kc_p2p_write_all(kc_p2p_fd_t fd, const char *buf, int len);
+static void kc_p2p_shutdown_write(kc_p2p_fd_t fd);
+static int kc_p2p_is_space(char ch);
+static char *kc_p2p_trim(char *text);
+static int kc_p2p_find_vip(kc_p2p_t *ctx, const char *id);
+static int kc_p2p_add_vip(kc_p2p_t *ctx, const char *id, const char *pass,
     char *err, size_t err_cap);
-static const char *kc_hpm_get_register_pass(kc_hpm_t *ctx, const char *id);
-static uint32_t kc_hpm_load_u32_le(const unsigned char *p);
+static const char *kc_p2p_get_register_pass(kc_p2p_t *ctx, const char *id);
+static uint32_t kc_p2p_load_u32_le(const unsigned char *p);
 
 /**
  * Reports whether detailed stream logs are enabled.
  * @return 1 when stream debug logging is enabled, 0 otherwise.
  */
-static int kc_hpm_stream_debug_enabled(void) {
+static int kc_p2p_stream_debug_enabled(void) {
     static int loaded = 0;
     static int enabled = 0;
     const char *env;
 
     if (loaded) return enabled;
-    env = getenv("HPM_DEBUG_STREAM");
+    env = getenv("P2P_DEBUG_STREAM");
     enabled = env && env[0] != '\0' && strcmp(env, "0") != 0;
     loaded = 1;
     return enabled;
@@ -662,10 +662,10 @@ static int kc_hpm_stream_debug_enabled(void) {
  * Emits one conditional debug log line for stream internals.
  * @return None.
  */
-static void kc_hpm_stream_log(const char *fmt, ...) {
+static void kc_p2p_stream_log(const char *fmt, ...) {
     va_list ap;
 
-    if (!kc_hpm_stream_debug_enabled()) return;
+    if (!kc_p2p_stream_debug_enabled()) return;
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
@@ -675,13 +675,13 @@ static void kc_hpm_stream_log(const char *fmt, ...) {
  * Returns the configured debug drop cadence for TCP stream DATA frames.
  * @return Drop cadence, or 0 when disabled.
  */
-static int kc_hpm_stream_debug_drop_every(void) {
+static int kc_p2p_stream_debug_drop_every(void) {
     static int loaded = 0;
     static int every = 0;
     const char *env;
 
     if (loaded) return every;
-    env = getenv("HPM_DEBUG_STREAM_DROP_EVERY");
+    env = getenv("P2P_DEBUG_STREAM_DROP_EVERY");
     if (env && env[0] != '\0') every = atoi(env);
     if (every < 0) every = 0;
     loaded = 1;
@@ -692,13 +692,13 @@ static int kc_hpm_stream_debug_drop_every(void) {
  * Returns the configured debug reorder cadence for TCP DATA frames.
  * @return Reorder cadence, or 0 when disabled.
  */
-static int kc_hpm_stream_debug_reorder_every(void) {
+static int kc_p2p_stream_debug_reorder_every(void) {
     static int loaded = 0;
     static int every = 0;
     const char *env;
 
     if (loaded) return every;
-    env = getenv("HPM_DEBUG_STREAM_REORDER_EVERY");
+    env = getenv("P2P_DEBUG_STREAM_REORDER_EVERY");
     if (env && env[0] != '\0') every = atoi(env);
     if (every < 0) every = 0;
     loaded = 1;
@@ -709,22 +709,22 @@ static int kc_hpm_stream_debug_reorder_every(void) {
  * Decides whether to drop one outgoing DATA frame once for testing.
  * @return 1 when the frame should be dropped, 0 otherwise.
  */
-static int kc_hpm_stream_should_drop_once(const unsigned char *buf, size_t len) {
+static int kc_p2p_stream_should_drop_once(const unsigned char *buf, size_t len) {
     static int counter = 0;
-    static kc_hpm_stream_drop_record_t dropped[256];
+    static kc_p2p_stream_drop_record_t dropped[256];
     int every;
     uint8_t type;
     uint32_t seq;
     int i;
     int free_slot;
 
-    every = kc_hpm_stream_debug_drop_every();
+    every = kc_p2p_stream_debug_drop_every();
     if (every <= 0 || len < 44) return 0;
-    if (kc_hpm_load_u32_le(buf) != KC_HPM_STREAM_MAGIC) return 0;
-    if (buf[4] != KC_HPM_STREAM_VERSION) return 0;
+    if (kc_p2p_load_u32_le(buf) != KC_P2P_STREAM_MAGIC) return 0;
+    if (buf[4] != KC_P2P_STREAM_VERSION) return 0;
     type = buf[5];
-    if (type != KC_HPM_STREAM_TYPE_DATA) return 0;
-    seq = kc_hpm_load_u32_le(buf + 24);
+    if (type != KC_P2P_STREAM_TYPE_DATA) return 0;
+    seq = kc_p2p_load_u32_le(buf + 24);
     free_slot = -1;
     for (i = 0; i < 256; i++) {
         if (!dropped[i].used) {
@@ -733,7 +733,7 @@ static int kc_hpm_stream_should_drop_once(const unsigned char *buf, size_t len) 
         }
         if (dropped[i].seq == seq &&
             memcmp(dropped[i].session_id, buf + 8,
-                KC_HPM_STREAM_SESSION_ID_SZ) == 0)
+                KC_P2P_STREAM_SESSION_ID_SZ) == 0)
             return 0;
     }
     counter++;
@@ -742,8 +742,8 @@ static int kc_hpm_stream_should_drop_once(const unsigned char *buf, size_t len) 
     dropped[free_slot].used = 1;
     dropped[free_slot].seq = seq;
     memcpy(dropped[free_slot].session_id, buf + 8,
-        KC_HPM_STREAM_SESSION_ID_SZ);
-    kc_hpm_stream_log("hpm: stream drop-test seq=%u\n", (unsigned)seq);
+        KC_P2P_STREAM_SESSION_ID_SZ);
+    kc_p2p_stream_log("p2p: stream drop-test seq=%u\n", (unsigned)seq);
     return 1;
 }
 
@@ -751,22 +751,22 @@ static int kc_hpm_stream_should_drop_once(const unsigned char *buf, size_t len) 
  * Decides whether to delay one DATA frame for reordering tests.
  * @return 1 when the frame should be delayed, 0 otherwise.
  */
-static int kc_hpm_stream_should_reorder_once(const unsigned char *buf, size_t len) {
+static int kc_p2p_stream_should_reorder_once(const unsigned char *buf, size_t len) {
     static int counter = 0;
-    static kc_hpm_stream_drop_record_t delayed[256];
+    static kc_p2p_stream_drop_record_t delayed[256];
     int every;
     uint8_t type;
     uint32_t seq;
     int i;
     int free_slot;
 
-    every = kc_hpm_stream_debug_reorder_every();
+    every = kc_p2p_stream_debug_reorder_every();
     if (every <= 0 || len < 44) return 0;
-    if (kc_hpm_load_u32_le(buf) != KC_HPM_STREAM_MAGIC) return 0;
-    if (buf[4] != KC_HPM_STREAM_VERSION) return 0;
+    if (kc_p2p_load_u32_le(buf) != KC_P2P_STREAM_MAGIC) return 0;
+    if (buf[4] != KC_P2P_STREAM_VERSION) return 0;
     type = buf[5];
-    if (type != KC_HPM_STREAM_TYPE_DATA) return 0;
-    seq = kc_hpm_load_u32_le(buf + 24);
+    if (type != KC_P2P_STREAM_TYPE_DATA) return 0;
+    seq = kc_p2p_load_u32_le(buf + 24);
     free_slot = -1;
     for (i = 0; i < 256; i++) {
         if (!delayed[i].used) {
@@ -775,7 +775,7 @@ static int kc_hpm_stream_should_reorder_once(const unsigned char *buf, size_t le
         }
         if (delayed[i].seq == seq &&
             memcmp(delayed[i].session_id, buf + 8,
-                KC_HPM_STREAM_SESSION_ID_SZ) == 0)
+                KC_P2P_STREAM_SESSION_ID_SZ) == 0)
             return 0;
     }
     counter++;
@@ -784,8 +784,8 @@ static int kc_hpm_stream_should_reorder_once(const unsigned char *buf, size_t le
     delayed[free_slot].used = 1;
     delayed[free_slot].seq = seq;
     memcpy(delayed[free_slot].session_id, buf + 8,
-        KC_HPM_STREAM_SESSION_ID_SZ);
-    kc_hpm_stream_log("hpm: stream reorder-test seq=%u\n", (unsigned)seq);
+        KC_P2P_STREAM_SESSION_ID_SZ);
+    kc_p2p_stream_log("p2p: stream reorder-test seq=%u\n", (unsigned)seq);
     return 1;
 }
 
@@ -798,7 +798,7 @@ static int kc_hpm_stream_should_reorder_once(const unsigned char *buf, size_t le
  * Lock.
  * @return Status code.
  */
-static void kc_hpm_lock(kc_hpm_t *ctx) {
+static void kc_p2p_lock(kc_p2p_t *ctx) {
 #ifdef _WIN32
     EnterCriticalSection(&ctx->mutex);
 #else
@@ -815,7 +815,7 @@ static void kc_hpm_lock(kc_hpm_t *ctx) {
  * Unlock.
  * @return Status code.
  */
-static void kc_hpm_unlock(kc_hpm_t *ctx) {
+static void kc_p2p_unlock(kc_p2p_t *ctx) {
 #ifdef _WIN32
     LeaveCriticalSection(&ctx->mutex);
 #else
@@ -827,7 +827,7 @@ static void kc_hpm_unlock(kc_hpm_t *ctx) {
  * Loads one little-endian u16.
  * @return Decoded value.
  */
-static uint16_t kc_hpm_load_u16_le(const unsigned char *p) {
+static uint16_t kc_p2p_load_u16_le(const unsigned char *p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
@@ -835,7 +835,7 @@ static uint16_t kc_hpm_load_u16_le(const unsigned char *p) {
  * Loads one little-endian u32.
  * @return Decoded value.
  */
-static uint32_t kc_hpm_load_u32_le(const unsigned char *p) {
+static uint32_t kc_p2p_load_u32_le(const unsigned char *p) {
     return (uint32_t)p[0] |
         ((uint32_t)p[1] << 8) |
         ((uint32_t)p[2] << 16) |
@@ -846,7 +846,7 @@ static uint32_t kc_hpm_load_u32_le(const unsigned char *p) {
  * Stores one little-endian u16.
  * @return None.
  */
-static void kc_hpm_store_u16_le(unsigned char *p, uint16_t v) {
+static void kc_p2p_store_u16_le(unsigned char *p, uint16_t v) {
     p[0] = (unsigned char)(v & 0xffu);
     p[1] = (unsigned char)((v >> 8) & 0xffu);
 }
@@ -855,7 +855,7 @@ static void kc_hpm_store_u16_le(unsigned char *p, uint16_t v) {
  * Stores one little-endian u32.
  * @return None.
  */
-static void kc_hpm_store_u32_le(unsigned char *p, uint32_t v) {
+static void kc_p2p_store_u32_le(unsigned char *p, uint32_t v) {
     p[0] = (unsigned char)(v & 0xffu);
     p[1] = (unsigned char)((v >> 8) & 0xffu);
     p[2] = (unsigned char)((v >> 16) & 0xffu);
@@ -866,7 +866,7 @@ static void kc_hpm_store_u32_le(unsigned char *p, uint32_t v) {
  * Returns a millisecond timestamp.
  * @return Monotonic-ish timestamp in milliseconds.
  */
-static uint64_t kc_hpm_now_ms(void) {
+static uint64_t kc_p2p_now_ms(void) {
 #ifdef _WIN32
     return (uint64_t)GetTickCount64();
 #else
@@ -880,7 +880,7 @@ static uint64_t kc_hpm_now_ms(void) {
  * Fills a buffer with secure random bytes.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_fill_random(unsigned char *buf, size_t len) {
+static int kc_p2p_fill_random(unsigned char *buf, size_t len) {
 #ifdef _WIN32
     return BCryptGenRandom(NULL, (PUCHAR)buf, (ULONG)len,
         BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0 ? 0 : -1;
@@ -908,7 +908,7 @@ static int kc_hpm_fill_random(unsigned char *buf, size_t len) {
  * Decodes one hex nibble.
  * @return Nibble value, or -1 on error.
  */
-static int kc_hpm_hex_decode_nibble(char c) {
+static int kc_p2p_hex_decode_nibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
@@ -919,13 +919,13 @@ static int kc_hpm_hex_decode_nibble(char c) {
  * Decodes a fixed-size hex string.
  * @return 1 on success, 0 on error.
  */
-static int kc_hpm_hex_decode(const char *hex, unsigned char *out, size_t out_len) {
+static int kc_p2p_hex_decode(const char *hex, unsigned char *out, size_t out_len) {
     size_t i;
 
     if (!hex || !out) return 0;
     for (i = 0; i < out_len; i++) {
-        int hi = kc_hpm_hex_decode_nibble(hex[i * 2]);
-        int lo = kc_hpm_hex_decode_nibble(hex[i * 2 + 1]);
+        int hi = kc_p2p_hex_decode_nibble(hex[i * 2]);
+        int lo = kc_p2p_hex_decode_nibble(hex[i * 2 + 1]);
         if (hi < 0 || lo < 0) return 0;
         out[i] = (unsigned char)((hi << 4) | lo);
     }
@@ -936,66 +936,66 @@ static int kc_hpm_hex_decode(const char *hex, unsigned char *out, size_t out_len
  * Generates one secure stream session identifier.
  * @return 1 on success, 0 on error.
  */
-static int kc_hpm_stream_make_session_id(unsigned char out[KC_HPM_STREAM_SESSION_ID_SZ],
-    char hex[KC_HPM_STREAM_SESSION_ID_SZ * 2 + 1])
+static int kc_p2p_stream_make_session_id(unsigned char out[KC_P2P_STREAM_SESSION_ID_SZ],
+    char hex[KC_P2P_STREAM_SESSION_ID_SZ * 2 + 1])
 {
-    if (kc_hpm_fill_random(out, KC_HPM_STREAM_SESSION_ID_SZ) != 0) return 0;
-    return kc_hpm_hex_encode(out, KC_HPM_STREAM_SESSION_ID_SZ, hex,
-        KC_HPM_STREAM_SESSION_ID_SZ * 2 + 1);
+    if (kc_p2p_fill_random(out, KC_P2P_STREAM_SESSION_ID_SZ) != 0) return 0;
+    return kc_p2p_hex_encode(out, KC_P2P_STREAM_SESSION_ID_SZ, hex,
+        KC_P2P_STREAM_SESSION_ID_SZ * 2 + 1);
 }
 
 /**
  * Builds one AEAD nonce from session direction and sequence.
  * @return None.
  */
-static void kc_hpm_stream_nonce(unsigned char nonce[KC_HPM_STREAM_NONCE_SZ],
-    const unsigned char session_id[KC_HPM_STREAM_SESSION_ID_SZ],
+static void kc_p2p_stream_nonce(unsigned char nonce[KC_P2P_STREAM_NONCE_SZ],
+    const unsigned char session_id[KC_P2P_STREAM_SESSION_ID_SZ],
     uint8_t direction, uint32_t seq)
 {
-    memset(nonce, 0, KC_HPM_STREAM_NONCE_SZ);
-    memcpy(nonce, session_id, KC_HPM_STREAM_SESSION_ID_SZ);
+    memset(nonce, 0, KC_P2P_STREAM_NONCE_SZ);
+    memcpy(nonce, session_id, KC_P2P_STREAM_SESSION_ID_SZ);
     nonce[16] = direction;
-    kc_hpm_store_u32_le(nonce + 20, seq);
+    kc_p2p_store_u32_le(nonce + 20, seq);
 }
 
 /**
  * Reports the currently advertised receive window.
  * @return Available receive slots.
  */
-static uint16_t kc_hpm_stream_advertised_window(const kc_hpm_stream_state_t *st) {
+static uint16_t kc_p2p_stream_advertised_window(const kc_p2p_stream_state_t *st) {
     int used = 0;
     int i;
 
-    for (i = 0; i < KC_HPM_STREAM_RECV_WINDOW; i++) {
+    for (i = 0; i < KC_P2P_STREAM_RECV_WINDOW; i++) {
         if (st->in.slots[i].used) used++;
     }
-    if (used >= KC_HPM_STREAM_RECV_WINDOW) return 0;
-    return (uint16_t)(KC_HPM_STREAM_RECV_WINDOW - used);
+    if (used >= KC_P2P_STREAM_RECV_WINDOW) return 0;
+    return (uint16_t)(KC_P2P_STREAM_RECV_WINDOW - used);
 }
 
 /**
  * Initializes one TCP stream state block.
  * @return None.
  */
-static void kc_hpm_stream_init(kc_hpm_stream_state_t *st, int initiator,
-    const unsigned char session_id[KC_HPM_STREAM_SESSION_ID_SZ],
+static void kc_p2p_stream_init(kc_p2p_stream_state_t *st, int initiator,
+    const unsigned char session_id[KC_P2P_STREAM_SESSION_ID_SZ],
     const char *session_hex)
 {
     memset(st, 0, sizeof(*st));
     st->enabled = 1;
     st->initiator = initiator;
-    st->tx_direction = initiator ? KC_HPM_STREAM_DIR_C2S : KC_HPM_STREAM_DIR_S2C;
-    st->rx_direction = initiator ? KC_HPM_STREAM_DIR_S2C : KC_HPM_STREAM_DIR_C2S;
+    st->tx_direction = initiator ? KC_P2P_STREAM_DIR_C2S : KC_P2P_STREAM_DIR_S2C;
+    st->rx_direction = initiator ? KC_P2P_STREAM_DIR_S2C : KC_P2P_STREAM_DIR_C2S;
     st->ctrl_seq = 1;
-    memcpy(st->session_id, session_id, KC_HPM_STREAM_SESSION_ID_SZ);
+    memcpy(st->session_id, session_id, KC_P2P_STREAM_SESSION_ID_SZ);
     if (session_hex) {
         memcpy(st->session_hex, session_hex,
-            KC_HPM_STREAM_SESSION_ID_SZ * 2);
-        st->session_hex[KC_HPM_STREAM_SESSION_ID_SZ * 2] = '\0';
+            KC_P2P_STREAM_SESSION_ID_SZ * 2);
+        st->session_hex[KC_P2P_STREAM_SESSION_ID_SZ * 2] = '\0';
     }
     st->out.next_seq = 1;
     st->in.next_expected = 1;
-    st->last_rx_ms = kc_hpm_now_ms();
+    st->last_rx_ms = kc_p2p_now_ms();
     st->last_tx_ms = st->last_rx_ms;
     st->last_ack_ms = st->last_rx_ms;
     st->last_hello_ms = 0;
@@ -1005,15 +1005,15 @@ static void kc_hpm_stream_init(kc_hpm_stream_state_t *st, int initiator,
  * Sends one raw packet over the selected transport.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_stream_send_raw(kc_hpm_t *ctx, kc_hpm_fd_t fd,
+static int kc_p2p_stream_send_raw(kc_p2p_t *ctx, kc_p2p_fd_t fd,
     const struct sockaddr_in *peer_addr, const unsigned char *buf, size_t len)
 {
-    static kc_hpm_stream_pending_frame_t pending;
+    static kc_p2p_stream_pending_frame_t pending;
 
     (void)ctx;
 
-    if (kc_hpm_stream_should_drop_once(buf, len)) return 0;
-    if (!pending.used && kc_hpm_stream_should_reorder_once(buf, len)) {
+    if (kc_p2p_stream_should_drop_once(buf, len)) return 0;
+    if (!pending.used && kc_p2p_stream_should_reorder_once(buf, len)) {
         pending.used = 1;
         pending.len = len;
         memcpy(pending.frame, buf, len);
@@ -1035,8 +1035,8 @@ static int kc_hpm_stream_send_raw(kc_hpm_t *ctx, kc_hpm_fd_t fd,
  * Builds transcript input for session key derivation.
  * @return None.
  */
-static void kc_hpm_stream_build_kdf_input(unsigned char *buf, size_t *len,
-    const kc_hpm_stream_state_t *st)
+static void kc_p2p_stream_build_kdf_input(unsigned char *buf, size_t *len,
+    const kc_p2p_stream_state_t *st)
 {
     const unsigned char *init_pub;
     const unsigned char *resp_pub;
@@ -1048,11 +1048,11 @@ static void kc_hpm_stream_build_kdf_input(unsigned char *buf, size_t *len,
     init_nonce = st->initiator ? st->crypto.local_nonce : st->crypto.peer_nonce;
     resp_nonce = st->initiator ? st->crypto.peer_nonce : st->crypto.local_nonce;
 
-    memcpy(buf, st->session_id, KC_HPM_STREAM_SESSION_ID_SZ);
+    memcpy(buf, st->session_id, KC_P2P_STREAM_SESSION_ID_SZ);
     memcpy(buf + 16, init_pub, 32);
     memcpy(buf + 48, resp_pub, 32);
-    memcpy(buf + 80, init_nonce, KC_HPM_STREAM_HELLO_NONCE_SZ);
-    memcpy(buf + 96, resp_nonce, KC_HPM_STREAM_HELLO_NONCE_SZ);
+    memcpy(buf + 80, init_nonce, KC_P2P_STREAM_HELLO_NONCE_SZ);
+    memcpy(buf + 96, resp_nonce, KC_P2P_STREAM_HELLO_NONCE_SZ);
     *len = 112;
 }
 
@@ -1060,7 +1060,7 @@ static void kc_hpm_stream_build_kdf_input(unsigned char *buf, size_t *len,
  * Derives one directional key from shared secret material.
  * @return None.
  */
-static void kc_hpm_stream_derive_key(unsigned char out[32], const unsigned char shared[32],
+static void kc_p2p_stream_derive_key(unsigned char out[32], const unsigned char shared[32],
     const unsigned char *kdf, size_t kdf_len, const char *label)
 {
     unsigned char msg[160];
@@ -1076,7 +1076,7 @@ static void kc_hpm_stream_derive_key(unsigned char out[32], const unsigned char 
  * Completes stream key derivation when peer material arrives.
  * @return 1 when ready, 0 when peer material is incomplete.
  */
-static int kc_hpm_stream_crypto_ready(kc_hpm_stream_state_t *st) {
+static int kc_p2p_stream_crypto_ready(kc_p2p_stream_state_t *st) {
     unsigned char shared[32];
     unsigned char kdf[112];
     size_t kdf_len;
@@ -1088,17 +1088,17 @@ static int kc_hpm_stream_crypto_ready(kc_hpm_stream_state_t *st) {
     if (crypto_verify32(st->crypto.local_public, st->crypto.peer_public) == 0)
         return 0;
     crypto_x25519(shared, st->crypto.local_secret, st->crypto.peer_public);
-    kc_hpm_stream_build_kdf_input(kdf, &kdf_len, st);
+    kc_p2p_stream_build_kdf_input(kdf, &kdf_len, st);
     if (st->initiator) {
-        kc_hpm_stream_derive_key(st->crypto.tx_key, shared, kdf, kdf_len, "c2s");
-        kc_hpm_stream_derive_key(st->crypto.rx_key, shared, kdf, kdf_len, "s2c");
+        kc_p2p_stream_derive_key(st->crypto.tx_key, shared, kdf, kdf_len, "c2s");
+        kc_p2p_stream_derive_key(st->crypto.rx_key, shared, kdf, kdf_len, "s2c");
     } else {
-        kc_hpm_stream_derive_key(st->crypto.tx_key, shared, kdf, kdf_len, "s2c");
-        kc_hpm_stream_derive_key(st->crypto.rx_key, shared, kdf, kdf_len, "c2s");
+        kc_p2p_stream_derive_key(st->crypto.tx_key, shared, kdf, kdf_len, "s2c");
+        kc_p2p_stream_derive_key(st->crypto.rx_key, shared, kdf, kdf_len, "c2s");
     }
     st->crypto.ready = 1;
     st->ready = 1;
-    kc_hpm_stream_log("hpm: tcp session %s stream ready\n", st->session_hex);
+    kc_p2p_stream_log("p2p: tcp session %s stream ready\n", st->session_hex);
     crypto_wipe(shared, sizeof(shared));
     crypto_wipe(kdf, sizeof(kdf));
     return 1;
@@ -1108,10 +1108,10 @@ static int kc_hpm_stream_crypto_ready(kc_hpm_stream_state_t *st) {
  * Generates local ephemeral keys and hello nonce.
  * @return 1 on success, 0 on error.
  */
-static int kc_hpm_stream_crypto_init(kc_hpm_stream_state_t *st) {
-    if (kc_hpm_fill_random(st->crypto.local_secret, 32) != 0) return 0;
-    if (kc_hpm_fill_random(st->crypto.local_nonce,
-        KC_HPM_STREAM_HELLO_NONCE_SZ) != 0) return 0;
+static int kc_p2p_stream_crypto_init(kc_p2p_stream_state_t *st) {
+    if (kc_p2p_fill_random(st->crypto.local_secret, 32) != 0) return 0;
+    if (kc_p2p_fill_random(st->crypto.local_nonce,
+        KC_P2P_STREAM_HELLO_NONCE_SZ) != 0) return 0;
     crypto_x25519_public_key(st->crypto.local_public, st->crypto.local_secret);
     return 1;
 }
@@ -1120,10 +1120,10 @@ static int kc_hpm_stream_crypto_init(kc_hpm_stream_state_t *st) {
  * Counts currently unacknowledged reliable frames.
  * @return In-flight frame count.
  */
-static int kc_hpm_stream_inflight(const kc_hpm_stream_state_t *st) {
+static int kc_p2p_stream_inflight(const kc_p2p_stream_state_t *st) {
     int i;
     int n = 0;
-    for (i = 0; i < KC_HPM_STREAM_SEND_WINDOW; i++) {
+    for (i = 0; i < KC_P2P_STREAM_SEND_WINDOW; i++) {
         if (st->out.slots[i].used) n++;
     }
     return n;
@@ -1133,26 +1133,26 @@ static int kc_hpm_stream_inflight(const kc_hpm_stream_state_t *st) {
  * Reports whether the local TCP side may queue more data.
  * @return 1 when more data may be read, 0 otherwise.
  */
-static int kc_hpm_stream_can_send_data(const kc_hpm_stream_state_t *st) {
+static int kc_p2p_stream_can_send_data(const kc_p2p_stream_state_t *st) {
     return st->ready && !st->out.local_eof &&
-        kc_hpm_stream_inflight(st) < KC_HPM_STREAM_SEND_WINDOW;
+        kc_p2p_stream_inflight(st) < KC_P2P_STREAM_SEND_WINDOW;
 }
 
 /**
  * Packs one plaintext hello frame.
  * @return Encoded byte length.
  */
-static size_t kc_hpm_stream_pack_hello(uint8_t type, const kc_hpm_stream_state_t *st,
+static size_t kc_p2p_stream_pack_hello(uint8_t type, const kc_p2p_stream_state_t *st,
     unsigned char *out)
 {
-    kc_hpm_store_u32_le(out, KC_HPM_STREAM_MAGIC);
-    out[4] = KC_HPM_STREAM_VERSION;
+    kc_p2p_store_u32_le(out, KC_P2P_STREAM_MAGIC);
+    out[4] = KC_P2P_STREAM_VERSION;
     out[5] = type;
     out[6] = st->tx_direction;
     out[7] = 0;
-    memcpy(out + 8, st->session_id, KC_HPM_STREAM_SESSION_ID_SZ);
+    memcpy(out + 8, st->session_id, KC_P2P_STREAM_SESSION_ID_SZ);
     memcpy(out + 24, st->crypto.local_public, 32);
-    memcpy(out + 56, st->crypto.local_nonce, KC_HPM_STREAM_HELLO_NONCE_SZ);
+    memcpy(out + 56, st->crypto.local_nonce, KC_P2P_STREAM_HELLO_NONCE_SZ);
     return 72;
 }
 
@@ -1160,20 +1160,20 @@ static size_t kc_hpm_stream_pack_hello(uint8_t type, const kc_hpm_stream_state_t
  * Parses one plaintext hello frame.
  * @return 1 on success, 0 on mismatch.
  */
-static int kc_hpm_stream_unpack_hello(const unsigned char *buf, size_t len,
+static int kc_p2p_stream_unpack_hello(const unsigned char *buf, size_t len,
     uint8_t *type, uint8_t *direction,
-    unsigned char session_id[KC_HPM_STREAM_SESSION_ID_SZ],
+    unsigned char session_id[KC_P2P_STREAM_SESSION_ID_SZ],
     unsigned char peer_public[32],
-    unsigned char peer_nonce[KC_HPM_STREAM_HELLO_NONCE_SZ])
+    unsigned char peer_nonce[KC_P2P_STREAM_HELLO_NONCE_SZ])
 {
     if (len < 72) return 0;
-    if (kc_hpm_load_u32_le(buf) != KC_HPM_STREAM_MAGIC) return 0;
-    if (buf[4] != KC_HPM_STREAM_VERSION) return 0;
+    if (kc_p2p_load_u32_le(buf) != KC_P2P_STREAM_MAGIC) return 0;
+    if (buf[4] != KC_P2P_STREAM_VERSION) return 0;
     *type = buf[5];
     *direction = buf[6];
-    memcpy(session_id, buf + 8, KC_HPM_STREAM_SESSION_ID_SZ);
+    memcpy(session_id, buf + 8, KC_P2P_STREAM_SESSION_ID_SZ);
     memcpy(peer_public, buf + 24, 32);
-    memcpy(peer_nonce, buf + 56, KC_HPM_STREAM_HELLO_NONCE_SZ);
+    memcpy(peer_nonce, buf + 56, KC_P2P_STREAM_HELLO_NONCE_SZ);
     return 1;
 }
 
@@ -1181,21 +1181,21 @@ static int kc_hpm_stream_unpack_hello(const unsigned char *buf, size_t len,
  * Encodes one authenticated stream header.
  * @return Encoded header length.
  */
-static size_t kc_hpm_stream_pack_header(const kc_hpm_stream_header_t *hdr,
+static size_t kc_p2p_stream_pack_header(const kc_p2p_stream_header_t *hdr,
     unsigned char *out)
 {
-    kc_hpm_store_u32_le(out, KC_HPM_STREAM_MAGIC);
-    out[4] = KC_HPM_STREAM_VERSION;
+    kc_p2p_store_u32_le(out, KC_P2P_STREAM_MAGIC);
+    out[4] = KC_P2P_STREAM_VERSION;
     out[5] = hdr->type;
     out[6] = hdr->direction;
     out[7] = 0;
-    memcpy(out + 8, hdr->session_id, KC_HPM_STREAM_SESSION_ID_SZ);
-    kc_hpm_store_u32_le(out + 24, hdr->seq);
-    kc_hpm_store_u32_le(out + 28, hdr->ack);
-    kc_hpm_store_u16_le(out + 32, hdr->window);
-    kc_hpm_store_u16_le(out + 34, hdr->payload_len);
-    kc_hpm_store_u32_le(out + 36, hdr->gap_start);
-    kc_hpm_store_u32_le(out + 40, hdr->gap_end);
+    memcpy(out + 8, hdr->session_id, KC_P2P_STREAM_SESSION_ID_SZ);
+    kc_p2p_store_u32_le(out + 24, hdr->seq);
+    kc_p2p_store_u32_le(out + 28, hdr->ack);
+    kc_p2p_store_u16_le(out + 32, hdr->window);
+    kc_p2p_store_u16_le(out + 34, hdr->payload_len);
+    kc_p2p_store_u32_le(out + 36, hdr->gap_start);
+    kc_p2p_store_u32_le(out + 40, hdr->gap_end);
     return 44;
 }
 
@@ -1203,21 +1203,21 @@ static size_t kc_hpm_stream_pack_header(const kc_hpm_stream_header_t *hdr,
  * Parses one authenticated stream header.
  * @return 1 on success, 0 on error.
  */
-static int kc_hpm_stream_unpack_header(const unsigned char *buf, size_t len,
-    kc_hpm_stream_header_t *hdr)
+static int kc_p2p_stream_unpack_header(const unsigned char *buf, size_t len,
+    kc_p2p_stream_header_t *hdr)
 {
     if (len < 60) return 0;
-    if (kc_hpm_load_u32_le(buf) != KC_HPM_STREAM_MAGIC) return 0;
-    if (buf[4] != KC_HPM_STREAM_VERSION) return 0;
+    if (kc_p2p_load_u32_le(buf) != KC_P2P_STREAM_MAGIC) return 0;
+    if (buf[4] != KC_P2P_STREAM_VERSION) return 0;
     hdr->type = buf[5];
     hdr->direction = buf[6];
-    memcpy(hdr->session_id, buf + 8, KC_HPM_STREAM_SESSION_ID_SZ);
-    hdr->seq = kc_hpm_load_u32_le(buf + 24);
-    hdr->ack = kc_hpm_load_u32_le(buf + 28);
-    hdr->window = kc_hpm_load_u16_le(buf + 32);
-    hdr->payload_len = kc_hpm_load_u16_le(buf + 34);
-    hdr->gap_start = kc_hpm_load_u32_le(buf + 36);
-    hdr->gap_end = kc_hpm_load_u32_le(buf + 40);
+    memcpy(hdr->session_id, buf + 8, KC_P2P_STREAM_SESSION_ID_SZ);
+    hdr->seq = kc_p2p_load_u32_le(buf + 24);
+    hdr->ack = kc_p2p_load_u32_le(buf + 28);
+    hdr->window = kc_p2p_load_u16_le(buf + 32);
+    hdr->payload_len = kc_p2p_load_u16_le(buf + 34);
+    hdr->gap_start = kc_p2p_load_u32_le(buf + 36);
+    hdr->gap_end = kc_p2p_load_u32_le(buf + 40);
     if ((size_t)(60 + hdr->payload_len) > len) return 0;
     return 1;
 }
@@ -1226,21 +1226,21 @@ static int kc_hpm_stream_unpack_header(const unsigned char *buf, size_t len,
  * Encrypts one post-handshake stream packet.
  * @return 1 on success, 0 on error.
  */
-static int kc_hpm_stream_encrypt_packet(kc_hpm_stream_state_t *st,
-    const kc_hpm_stream_header_t *hdr, const unsigned char *plain,
+static int kc_p2p_stream_encrypt_packet(kc_p2p_stream_state_t *st,
+    const kc_p2p_stream_header_t *hdr, const unsigned char *plain,
     size_t plain_len, unsigned char *out, size_t *out_len)
 {
-    unsigned char nonce[KC_HPM_STREAM_NONCE_SZ];
-    size_t ad_len = kc_hpm_stream_pack_header(hdr, out);
+    unsigned char nonce[KC_P2P_STREAM_NONCE_SZ];
+    size_t ad_len = kc_p2p_stream_pack_header(hdr, out);
     unsigned char *mac = out + ad_len;
-    unsigned char *cipher = out + ad_len + KC_HPM_STREAM_TAG_SZ;
+    unsigned char *cipher = out + ad_len + KC_P2P_STREAM_TAG_SZ;
 
-    if (ad_len + KC_HPM_STREAM_TAG_SZ + plain_len > KC_HPM_STREAM_MAX_FRAME)
+    if (ad_len + KC_P2P_STREAM_TAG_SZ + plain_len > KC_P2P_STREAM_MAX_FRAME)
         return 0;
-    kc_hpm_stream_nonce(nonce, hdr->session_id, hdr->direction, hdr->seq);
+    kc_p2p_stream_nonce(nonce, hdr->session_id, hdr->direction, hdr->seq);
     crypto_aead_lock(cipher, mac, st->crypto.tx_key, nonce, out, ad_len,
         plain, plain_len);
-    *out_len = ad_len + KC_HPM_STREAM_TAG_SZ + plain_len;
+    *out_len = ad_len + KC_P2P_STREAM_TAG_SZ + plain_len;
     return 1;
 }
 
@@ -1248,16 +1248,16 @@ static int kc_hpm_stream_encrypt_packet(kc_hpm_stream_state_t *st,
  * Authenticates and decrypts one post-handshake stream packet.
  * @return 1 on success, 0 on authentication failure.
  */
-static int kc_hpm_stream_decrypt_packet(kc_hpm_stream_state_t *st,
-    const kc_hpm_stream_header_t *hdr, const unsigned char *buf,
+static int kc_p2p_stream_decrypt_packet(kc_p2p_stream_state_t *st,
+    const kc_p2p_stream_header_t *hdr, const unsigned char *buf,
     unsigned char *plain)
 {
-    unsigned char nonce[KC_HPM_STREAM_NONCE_SZ];
+    unsigned char nonce[KC_P2P_STREAM_NONCE_SZ];
     size_t ad_len = 44;
     const unsigned char *mac = buf + ad_len;
-    const unsigned char *cipher = buf + ad_len + KC_HPM_STREAM_TAG_SZ;
+    const unsigned char *cipher = buf + ad_len + KC_P2P_STREAM_TAG_SZ;
 
-    kc_hpm_stream_nonce(nonce, hdr->session_id, hdr->direction, hdr->seq);
+    kc_p2p_stream_nonce(nonce, hdr->session_id, hdr->direction, hdr->seq);
     return crypto_aead_unlock(plain, mac, st->crypto.rx_key, nonce, buf,
         ad_len, cipher, hdr->payload_len) == 0;
 }
@@ -1266,11 +1266,11 @@ static int kc_hpm_stream_decrypt_packet(kc_hpm_stream_state_t *st,
  * Finds one resend slot by sequence number.
  * @return Matching slot, or NULL.
  */
-static kc_hpm_stream_send_slot_t *kc_hpm_stream_find_send_slot(
-    kc_hpm_stream_state_t *st, uint32_t seq)
+static kc_p2p_stream_send_slot_t *kc_p2p_stream_find_send_slot(
+    kc_p2p_stream_state_t *st, uint32_t seq)
 {
     int i;
-    for (i = 0; i < KC_HPM_STREAM_SEND_WINDOW; i++) {
+    for (i = 0; i < KC_P2P_STREAM_SEND_WINDOW; i++) {
         if (st->out.slots[i].used && st->out.slots[i].seq == seq)
             return &st->out.slots[i];
     }
@@ -1281,11 +1281,11 @@ static kc_hpm_stream_send_slot_t *kc_hpm_stream_find_send_slot(
  * Finds one receive slot by sequence number.
  * @return Matching slot, or NULL.
  */
-static kc_hpm_stream_recv_slot_t *kc_hpm_stream_find_recv_slot(
-    kc_hpm_stream_state_t *st, uint32_t seq)
+static kc_p2p_stream_recv_slot_t *kc_p2p_stream_find_recv_slot(
+    kc_p2p_stream_state_t *st, uint32_t seq)
 {
     int i;
-    for (i = 0; i < KC_HPM_STREAM_RECV_WINDOW; i++) {
+    for (i = 0; i < KC_P2P_STREAM_RECV_WINDOW; i++) {
         if (st->in.slots[i].used && st->in.slots[i].seq == seq)
             return &st->in.slots[i];
     }
@@ -1296,11 +1296,11 @@ static kc_hpm_stream_recv_slot_t *kc_hpm_stream_find_recv_slot(
  * Allocates one free receive slot.
  * @return Free slot, or NULL.
  */
-static kc_hpm_stream_recv_slot_t *kc_hpm_stream_alloc_recv_slot(
-    kc_hpm_stream_state_t *st)
+static kc_p2p_stream_recv_slot_t *kc_p2p_stream_alloc_recv_slot(
+    kc_p2p_stream_state_t *st)
 {
     int i;
-    for (i = 0; i < KC_HPM_STREAM_RECV_WINDOW; i++) {
+    for (i = 0; i < KC_P2P_STREAM_RECV_WINDOW; i++) {
         if (!st->in.slots[i].used) return &st->in.slots[i];
     }
     return NULL;
@@ -1310,11 +1310,11 @@ static kc_hpm_stream_recv_slot_t *kc_hpm_stream_alloc_recv_slot(
  * Allocates one free resend slot.
  * @return Free slot, or NULL.
  */
-static kc_hpm_stream_send_slot_t *kc_hpm_stream_alloc_send_slot(
-    kc_hpm_stream_state_t *st)
+static kc_p2p_stream_send_slot_t *kc_p2p_stream_alloc_send_slot(
+    kc_p2p_stream_state_t *st)
 {
     int i;
-    for (i = 0; i < KC_HPM_STREAM_SEND_WINDOW; i++) {
+    for (i = 0; i < KC_P2P_STREAM_SEND_WINDOW; i++) {
         if (!st->out.slots[i].used) return &st->out.slots[i];
     }
     return NULL;
@@ -1324,11 +1324,11 @@ static kc_hpm_stream_send_slot_t *kc_hpm_stream_alloc_send_slot(
  * Drops all resend slots covered by a cumulative ACK.
  * @return None.
  */
-static void kc_hpm_stream_ack_until(kc_hpm_stream_state_t *st, uint32_t ack) {
+static void kc_p2p_stream_ack_until(kc_p2p_stream_state_t *st, uint32_t ack) {
     int i;
-    for (i = 0; i < KC_HPM_STREAM_SEND_WINDOW; i++) {
+    for (i = 0; i < KC_P2P_STREAM_SEND_WINDOW; i++) {
         if (st->out.slots[i].used && st->out.slots[i].seq <= ack) {
-            if (st->out.slots[i].type == KC_HPM_STREAM_TYPE_FIN)
+            if (st->out.slots[i].type == KC_P2P_STREAM_TYPE_FIN)
                 st->out.fin_acked = 1;
             st->out.slots[i].used = 0;
         }
@@ -1339,13 +1339,13 @@ static void kc_hpm_stream_ack_until(kc_hpm_stream_state_t *st, uint32_t ack) {
  * Sends one encrypted control frame.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_stream_send_control(kc_hpm_t *ctx, kc_hpm_fd_t fd,
+static int kc_p2p_stream_send_control(kc_p2p_t *ctx, kc_p2p_fd_t fd,
     const struct sockaddr_in *peer_addr,
-    kc_hpm_stream_state_t *st, uint8_t type, uint32_t seq,
+    kc_p2p_stream_state_t *st, uint8_t type, uint32_t seq,
     uint32_t gap_start, uint32_t gap_end)
 {
-    kc_hpm_stream_header_t hdr;
-    unsigned char frame[KC_HPM_STREAM_MAX_FRAME];
+    kc_p2p_stream_header_t hdr;
+    unsigned char frame[KC_P2P_STREAM_MAX_FRAME];
     size_t frame_len;
 
     memset(&hdr, 0, sizeof(hdr));
@@ -1353,17 +1353,17 @@ static int kc_hpm_stream_send_control(kc_hpm_t *ctx, kc_hpm_fd_t fd,
     hdr.direction = st->tx_direction;
     hdr.seq = seq ? seq : st->ctrl_seq++;
     hdr.ack = st->in.next_expected ? st->in.next_expected - 1 : 0;
-    hdr.window = kc_hpm_stream_advertised_window(st);
+    hdr.window = kc_p2p_stream_advertised_window(st);
     hdr.payload_len = 0;
     hdr.gap_start = gap_start;
     hdr.gap_end = gap_end;
-    memcpy(hdr.session_id, st->session_id, KC_HPM_STREAM_SESSION_ID_SZ);
+    memcpy(hdr.session_id, st->session_id, KC_P2P_STREAM_SESSION_ID_SZ);
 
-    if (!kc_hpm_stream_encrypt_packet(st, &hdr, NULL, 0, frame, &frame_len))
+    if (!kc_p2p_stream_encrypt_packet(st, &hdr, NULL, 0, frame, &frame_len))
         return -1;
-    if (kc_hpm_stream_send_raw(ctx, fd, peer_addr, frame, frame_len) != 0)
+    if (kc_p2p_stream_send_raw(ctx, fd, peer_addr, frame, frame_len) != 0)
         return -1;
-    st->last_tx_ms = kc_hpm_now_ms();
+    st->last_tx_ms = kc_p2p_now_ms();
     st->last_ack_ms = st->last_tx_ms;
     return 0;
 }
@@ -1372,18 +1372,18 @@ static int kc_hpm_stream_send_control(kc_hpm_t *ctx, kc_hpm_fd_t fd,
  * Sends one plaintext hello or hello-ack frame.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_stream_send_hello(kc_hpm_t *ctx, kc_hpm_fd_t fd,
+static int kc_p2p_stream_send_hello(kc_p2p_t *ctx, kc_p2p_fd_t fd,
     const struct sockaddr_in *peer_addr,
-    kc_hpm_stream_state_t *st, uint8_t type)
+    kc_p2p_stream_state_t *st, uint8_t type)
 {
     unsigned char frame[96];
     size_t frame_len;
 
-    frame_len = kc_hpm_stream_pack_hello(type, st, frame);
-    if (kc_hpm_stream_send_raw(ctx, fd, peer_addr, frame, frame_len) != 0)
+    frame_len = kc_p2p_stream_pack_hello(type, st, frame);
+    if (kc_p2p_stream_send_raw(ctx, fd, peer_addr, frame, frame_len) != 0)
         return -1;
     st->hello_sent = 1;
-    st->last_hello_ms = kc_hpm_now_ms();
+    st->last_hello_ms = kc_p2p_now_ms();
     st->last_tx_ms = st->last_hello_ms;
     return 0;
 }
@@ -1392,16 +1392,16 @@ static int kc_hpm_stream_send_hello(kc_hpm_t *ctx, kc_hpm_fd_t fd,
  * Queues and transmits one reliable DATA or FIN frame.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_stream_queue_reliable(kc_hpm_t *ctx, kc_hpm_fd_t fd,
+static int kc_p2p_stream_queue_reliable(kc_p2p_t *ctx, kc_p2p_fd_t fd,
     const struct sockaddr_in *peer_addr,
-    kc_hpm_stream_state_t *st, uint8_t type,
+    kc_p2p_stream_state_t *st, uint8_t type,
     const unsigned char *plain, size_t plain_len)
 {
-    kc_hpm_stream_send_slot_t *slot;
-    kc_hpm_stream_header_t hdr;
+    kc_p2p_stream_send_slot_t *slot;
+    kc_p2p_stream_header_t hdr;
     size_t frame_len;
 
-    slot = kc_hpm_stream_alloc_send_slot(st);
+    slot = kc_p2p_stream_alloc_send_slot(st);
     if (!slot) return -1;
 
     memset(&hdr, 0, sizeof(hdr));
@@ -1409,11 +1409,11 @@ static int kc_hpm_stream_queue_reliable(kc_hpm_t *ctx, kc_hpm_fd_t fd,
     hdr.direction = st->tx_direction;
     hdr.seq = st->out.next_seq++;
     hdr.ack = st->in.next_expected ? st->in.next_expected - 1 : 0;
-    hdr.window = kc_hpm_stream_advertised_window(st);
+    hdr.window = kc_p2p_stream_advertised_window(st);
     hdr.payload_len = (uint16_t)plain_len;
-    memcpy(hdr.session_id, st->session_id, KC_HPM_STREAM_SESSION_ID_SZ);
+    memcpy(hdr.session_id, st->session_id, KC_P2P_STREAM_SESSION_ID_SZ);
 
-    if (!kc_hpm_stream_encrypt_packet(st, &hdr, plain, plain_len,
+    if (!kc_p2p_stream_encrypt_packet(st, &hdr, plain, plain_len,
         slot->frame, &frame_len))
         return -1;
     slot->used = 1;
@@ -1421,15 +1421,15 @@ static int kc_hpm_stream_queue_reliable(kc_hpm_t *ctx, kc_hpm_fd_t fd,
     slot->seq = hdr.seq;
     slot->attempts = 1;
     slot->frame_len = frame_len;
-    slot->last_tx_ms = kc_hpm_now_ms();
+    slot->last_tx_ms = kc_p2p_now_ms();
 
-    if (kc_hpm_stream_send_raw(ctx, fd, peer_addr, slot->frame,
+    if (kc_p2p_stream_send_raw(ctx, fd, peer_addr, slot->frame,
         slot->frame_len) != 0) {
         slot->used = 0;
         return -1;
     }
     st->last_tx_ms = slot->last_tx_ms;
-    if (type == KC_HPM_STREAM_TYPE_FIN) st->out.fin_sent = 1;
+    if (type == KC_P2P_STREAM_TYPE_FIN) st->out.fin_sent = 1;
     return 0;
 }
 
@@ -1437,21 +1437,21 @@ static int kc_hpm_stream_queue_reliable(kc_hpm_t *ctx, kc_hpm_fd_t fd,
  * Delivers newly contiguous inbound data to the local TCP socket.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_stream_flush_contiguous(kc_hpm_stream_state_t *st,
-    kc_hpm_fd_t tcp_fd)
+static int kc_p2p_stream_flush_contiguous(kc_p2p_stream_state_t *st,
+    kc_p2p_fd_t tcp_fd)
 {
     for (;;) {
-        kc_hpm_stream_recv_slot_t *slot =
-            kc_hpm_stream_find_recv_slot(st, st->in.next_expected);
+        kc_p2p_stream_recv_slot_t *slot =
+            kc_p2p_stream_find_recv_slot(st, st->in.next_expected);
         if (!slot) break;
-        if (slot->type == KC_HPM_STREAM_TYPE_FIN) {
+        if (slot->type == KC_P2P_STREAM_TYPE_FIN) {
             st->in.remote_fin = 1;
             st->in.next_expected++;
             slot->used = 0;
-            kc_hpm_shutdown_write(tcp_fd);
+            kc_p2p_shutdown_write(tcp_fd);
             continue;
         }
-        if (slot->len > 0 && kc_hpm_write_all(tcp_fd,
+        if (slot->len > 0 && kc_p2p_write_all(tcp_fd,
             (const char *)slot->data, slot->len) != 0)
             return -1;
         st->in.next_expected++;
@@ -1464,14 +1464,14 @@ static int kc_hpm_stream_flush_contiguous(kc_hpm_stream_state_t *st,
  * Stores one inbound DATA or FIN frame in the receive window.
  * @return 0 on success, -1 on overflow.
  */
-static int kc_hpm_stream_store_inbound(kc_hpm_stream_state_t *st,
+static int kc_p2p_stream_store_inbound(kc_p2p_stream_state_t *st,
     uint8_t type, uint32_t seq, const unsigned char *plain, size_t plain_len)
 {
-    kc_hpm_stream_recv_slot_t *slot;
+    kc_p2p_stream_recv_slot_t *slot;
 
     if (seq < st->in.next_expected) return 0;
-    if (kc_hpm_stream_find_recv_slot(st, seq)) return 0;
-    slot = kc_hpm_stream_alloc_recv_slot(st);
+    if (kc_p2p_stream_find_recv_slot(st, seq)) return 0;
+    slot = kc_p2p_stream_alloc_recv_slot(st);
     if (!slot) return -1;
     slot->used = 1;
     slot->type = type;
@@ -1485,19 +1485,19 @@ static int kc_hpm_stream_store_inbound(kc_hpm_stream_state_t *st,
  * Retransmits a requested missing range.
  * @return 0 on success, -1 on transport error.
  */
-static int kc_hpm_stream_note_sack(kc_hpm_t *ctx, kc_hpm_fd_t fd,
+static int kc_p2p_stream_note_sack(kc_p2p_t *ctx, kc_p2p_fd_t fd,
     const struct sockaddr_in *peer_addr,
-    kc_hpm_stream_state_t *st, uint32_t gap_start, uint32_t gap_end)
+    kc_p2p_stream_state_t *st, uint32_t gap_start, uint32_t gap_end)
 {
     uint32_t seq;
     for (seq = gap_start; seq <= gap_end; seq++) {
-        kc_hpm_stream_send_slot_t *slot = kc_hpm_stream_find_send_slot(st, seq);
+        kc_p2p_stream_send_slot_t *slot = kc_p2p_stream_find_send_slot(st, seq);
         if (!slot) continue;
-        if (slot->attempts >= KC_HPM_STREAM_MAX_RETRIES) continue;
-        if (kc_hpm_stream_send_raw(ctx, fd, peer_addr, slot->frame,
+        if (slot->attempts >= KC_P2P_STREAM_MAX_RETRIES) continue;
+        if (kc_p2p_stream_send_raw(ctx, fd, peer_addr, slot->frame,
             slot->frame_len) == 0) {
             slot->attempts++;
-            slot->last_tx_ms = kc_hpm_now_ms();
+            slot->last_tx_ms = kc_p2p_now_ms();
             st->last_tx_ms = slot->last_tx_ms;
         }
         if (seq == gap_end) break;
@@ -1509,102 +1509,102 @@ static int kc_hpm_stream_note_sack(kc_hpm_t *ctx, kc_hpm_fd_t fd,
  * Processes one inbound stream packet.
  * @return 0 on success, -1 on session failure.
  */
-static int kc_hpm_stream_process_packet(kc_hpm_t *ctx, kc_hpm_fd_t fd,
+static int kc_p2p_stream_process_packet(kc_p2p_t *ctx, kc_p2p_fd_t fd,
     const struct sockaddr_in *peer_addr,
-    kc_hpm_stream_state_t *st, kc_hpm_fd_t tcp_fd,
+    kc_p2p_stream_state_t *st, kc_p2p_fd_t tcp_fd,
     const unsigned char *buf, size_t len)
 {
-    kc_hpm_stream_header_t hdr;
-    unsigned char plain[KC_HPM_STREAM_MAX_PAYLOAD];
+    kc_p2p_stream_header_t hdr;
+    unsigned char plain[KC_P2P_STREAM_MAX_PAYLOAD];
     uint8_t hello_type;
     uint8_t hello_dir;
-    unsigned char hello_sid[KC_HPM_STREAM_SESSION_ID_SZ];
+    unsigned char hello_sid[KC_P2P_STREAM_SESSION_ID_SZ];
     unsigned char hello_pub[32];
-    unsigned char hello_nonce[KC_HPM_STREAM_HELLO_NONCE_SZ];
+    unsigned char hello_nonce[KC_P2P_STREAM_HELLO_NONCE_SZ];
 
-    if (kc_hpm_stream_unpack_hello(buf, len, &hello_type, &hello_dir,
+    if (kc_p2p_stream_unpack_hello(buf, len, &hello_type, &hello_dir,
         hello_sid, hello_pub, hello_nonce))
     {
-        if ((hello_type == KC_HPM_STREAM_TYPE_HELLO ||
-            hello_type == KC_HPM_STREAM_TYPE_HELLO_ACK) &&
-            memcmp(hello_sid, st->session_id, KC_HPM_STREAM_SESSION_ID_SZ) == 0)
+        if ((hello_type == KC_P2P_STREAM_TYPE_HELLO ||
+            hello_type == KC_P2P_STREAM_TYPE_HELLO_ACK) &&
+            memcmp(hello_sid, st->session_id, KC_P2P_STREAM_SESSION_ID_SZ) == 0)
         {
             memcpy(st->crypto.peer_public, hello_pub, 32);
             memcpy(st->crypto.peer_nonce, hello_nonce,
-                KC_HPM_STREAM_HELLO_NONCE_SZ);
-            st->hello_acked = (hello_type == KC_HPM_STREAM_TYPE_HELLO_ACK);
-            st->last_rx_ms = kc_hpm_now_ms();
-            kc_hpm_stream_log("hpm: stream selected endpoint %s\n",
+                KC_P2P_STREAM_HELLO_NONCE_SZ);
+            st->hello_acked = (hello_type == KC_P2P_STREAM_TYPE_HELLO_ACK);
+            st->last_rx_ms = kc_p2p_now_ms();
+            kc_p2p_stream_log("p2p: stream selected endpoint %s\n",
                 st->session_hex);
-            kc_hpm_stream_crypto_ready(st);
-            if (hello_type == KC_HPM_STREAM_TYPE_HELLO) {
-                if (kc_hpm_stream_send_hello(ctx, fd, peer_addr, st,
-                    KC_HPM_STREAM_TYPE_HELLO_ACK) != 0)
+            kc_p2p_stream_crypto_ready(st);
+            if (hello_type == KC_P2P_STREAM_TYPE_HELLO) {
+                if (kc_p2p_stream_send_hello(ctx, fd, peer_addr, st,
+                    KC_P2P_STREAM_TYPE_HELLO_ACK) != 0)
                     return -1;
             }
             return 0;
         }
     }
 
-    if (!kc_hpm_stream_unpack_header(buf, len, &hdr)) return 0;
-    if (memcmp(hdr.session_id, st->session_id, KC_HPM_STREAM_SESSION_ID_SZ) != 0)
+    if (!kc_p2p_stream_unpack_header(buf, len, &hdr)) return 0;
+    if (memcmp(hdr.session_id, st->session_id, KC_P2P_STREAM_SESSION_ID_SZ) != 0)
         return 0;
     if (!st->ready) return 0;
     if (hdr.direction != st->rx_direction) return 0;
-    if (!kc_hpm_stream_decrypt_packet(st, &hdr, buf, plain)) return -1;
+    if (!kc_p2p_stream_decrypt_packet(st, &hdr, buf, plain)) return -1;
 
-    st->last_rx_ms = kc_hpm_now_ms();
-    kc_hpm_stream_ack_until(st, hdr.ack);
+    st->last_rx_ms = kc_p2p_now_ms();
+    kc_p2p_stream_ack_until(st, hdr.ack);
 
-    if (hdr.type == KC_HPM_STREAM_TYPE_SACK) {
+    if (hdr.type == KC_P2P_STREAM_TYPE_SACK) {
         if (hdr.gap_start != 0 && hdr.gap_end >= hdr.gap_start)
-            return kc_hpm_stream_note_sack(ctx, fd, peer_addr, st,
+            return kc_p2p_stream_note_sack(ctx, fd, peer_addr, st,
                 hdr.gap_start, hdr.gap_end);
         return 0;
     }
-    if (hdr.type == KC_HPM_STREAM_TYPE_ACK || hdr.type == KC_HPM_STREAM_TYPE_PONG)
+    if (hdr.type == KC_P2P_STREAM_TYPE_ACK || hdr.type == KC_P2P_STREAM_TYPE_PONG)
         return 0;
-    if (hdr.type == KC_HPM_STREAM_TYPE_RESET) {
+    if (hdr.type == KC_P2P_STREAM_TYPE_RESET) {
         st->reset_received = 1;
         return -1;
     }
-    if (hdr.type == KC_HPM_STREAM_TYPE_PING) {
-        return kc_hpm_stream_send_control(ctx, fd, peer_addr, st,
-            KC_HPM_STREAM_TYPE_PONG, 0, 0, 0);
+    if (hdr.type == KC_P2P_STREAM_TYPE_PING) {
+        return kc_p2p_stream_send_control(ctx, fd, peer_addr, st,
+            KC_P2P_STREAM_TYPE_PONG, 0, 0, 0);
     }
-    if (hdr.type != KC_HPM_STREAM_TYPE_DATA && hdr.type != KC_HPM_STREAM_TYPE_FIN)
+    if (hdr.type != KC_P2P_STREAM_TYPE_DATA && hdr.type != KC_P2P_STREAM_TYPE_FIN)
         return 0;
 
-    kc_hpm_stream_log("hpm: stream rx seq=%u len=%u\n", (unsigned)hdr.seq,
+    kc_p2p_stream_log("p2p: stream rx seq=%u len=%u\n", (unsigned)hdr.seq,
         (unsigned)hdr.payload_len);
 
     if (hdr.seq > st->in.next_expected) {
-        kc_hpm_stream_log("hpm: stream gap detected expected=%u got=%u\n",
+        kc_p2p_stream_log("p2p: stream gap detected expected=%u got=%u\n",
             (unsigned)st->in.next_expected, (unsigned)hdr.seq);
-        if (kc_hpm_stream_store_inbound(st, hdr.type, hdr.seq, plain,
+        if (kc_p2p_stream_store_inbound(st, hdr.type, hdr.seq, plain,
             hdr.payload_len) != 0)
             return -1;
-        return kc_hpm_stream_send_control(ctx, fd, peer_addr, st,
-            KC_HPM_STREAM_TYPE_SACK, 0,
+        return kc_p2p_stream_send_control(ctx, fd, peer_addr, st,
+            KC_P2P_STREAM_TYPE_SACK, 0,
             st->in.next_expected, hdr.seq - 1);
     }
     if (hdr.seq < st->in.next_expected) {
-        return kc_hpm_stream_send_control(ctx, fd, peer_addr, st,
-            KC_HPM_STREAM_TYPE_ACK, 0, 0, 0);
+        return kc_p2p_stream_send_control(ctx, fd, peer_addr, st,
+            KC_P2P_STREAM_TYPE_ACK, 0, 0, 0);
     }
 
-    if (kc_hpm_stream_store_inbound(st, hdr.type, hdr.seq, plain,
+    if (kc_p2p_stream_store_inbound(st, hdr.type, hdr.seq, plain,
         hdr.payload_len) != 0)
         return -1;
-    if (kc_hpm_stream_flush_contiguous(st, tcp_fd) != 0) return -1;
-    if (hdr.type == KC_HPM_STREAM_TYPE_FIN) {
-        if (kc_hpm_stream_send_control(ctx, fd, peer_addr, st,
-            KC_HPM_STREAM_TYPE_FIN_ACK, 0,
+    if (kc_p2p_stream_flush_contiguous(st, tcp_fd) != 0) return -1;
+    if (hdr.type == KC_P2P_STREAM_TYPE_FIN) {
+        if (kc_p2p_stream_send_control(ctx, fd, peer_addr, st,
+            KC_P2P_STREAM_TYPE_FIN_ACK, 0,
             0, 0) != 0)
             return -1;
-    } else if (kc_hpm_now_ms() - st->last_ack_ms >= KC_HPM_STREAM_ACK_MS) {
-        if (kc_hpm_stream_send_control(ctx, fd, peer_addr, st,
-            KC_HPM_STREAM_TYPE_ACK, 0,
+    } else if (kc_p2p_now_ms() - st->last_ack_ms >= KC_P2P_STREAM_ACK_MS) {
+        if (kc_p2p_stream_send_control(ctx, fd, peer_addr, st,
+            KC_P2P_STREAM_TYPE_ACK, 0,
             0, 0) != 0)
             return -1;
     }
@@ -1615,31 +1615,31 @@ static int kc_hpm_stream_process_packet(kc_hpm_t *ctx, kc_hpm_fd_t fd,
  * Reads one local TCP chunk and queues it for reliable transport.
  * @return 0 on success, -1 on session failure.
  */
-static int kc_hpm_stream_pump_tcp(kc_hpm_t *ctx, kc_hpm_fd_t fd,
+static int kc_p2p_stream_pump_tcp(kc_p2p_t *ctx, kc_p2p_fd_t fd,
     const struct sockaddr_in *peer_addr,
-    kc_hpm_stream_state_t *st, kc_hpm_fd_t tcp_fd)
+    kc_p2p_stream_state_t *st, kc_p2p_fd_t tcp_fd)
 {
-    unsigned char buf[KC_HPM_STREAM_MAX_PAYLOAD];
+    unsigned char buf[KC_P2P_STREAM_MAX_PAYLOAD];
     int n;
 
-    if (!kc_hpm_stream_can_send_data(st)) return 0;
-    n = kc_hpm_sock_read(tcp_fd, (char *)buf, (int)sizeof(buf));
+    if (!kc_p2p_stream_can_send_data(st)) return 0;
+    n = kc_p2p_sock_read(tcp_fd, (char *)buf, (int)sizeof(buf));
     if (n < 0) {
-        if (KC_HPM_LASTERR() == KC_HPM_EWOULD) return 0;
+        if (KC_P2P_LASTERR() == KC_P2P_EWOULD) return 0;
         return -1;
     }
     if (n == 0) {
         st->out.local_eof = 1;
         if (!st->out.fin_sent)
-            return kc_hpm_stream_queue_reliable(ctx, fd, peer_addr, st,
-                KC_HPM_STREAM_TYPE_FIN,
+            return kc_p2p_stream_queue_reliable(ctx, fd, peer_addr, st,
+                KC_P2P_STREAM_TYPE_FIN,
                 NULL, 0);
         return 0;
     }
-    kc_hpm_stream_log("hpm: stream tx seq=%u len=%d\n",
+    kc_p2p_stream_log("p2p: stream tx seq=%u len=%d\n",
         (unsigned)st->out.next_seq, n);
-    return kc_hpm_stream_queue_reliable(ctx, fd, peer_addr, st,
-        KC_HPM_STREAM_TYPE_DATA, buf,
+    return kc_p2p_stream_queue_reliable(ctx, fd, peer_addr, st,
+        KC_P2P_STREAM_TYPE_DATA, buf,
         (size_t)n);
 }
 
@@ -1647,27 +1647,27 @@ static int kc_hpm_stream_pump_tcp(kc_hpm_t *ctx, kc_hpm_fd_t fd,
  * Advances timers, handshakes, ACKs, and retransmissions.
  * @return 0 on success, -1 on timeout or transport error.
  */
-static int kc_hpm_stream_tick(kc_hpm_t *ctx, kc_hpm_fd_t fd,
+static int kc_p2p_stream_tick(kc_p2p_t *ctx, kc_p2p_fd_t fd,
     const struct sockaddr_in *peer_addr,
-    kc_hpm_stream_state_t *st)
+    kc_p2p_stream_state_t *st)
 {
-    uint64_t now = kc_hpm_now_ms();
+    uint64_t now = kc_p2p_now_ms();
     int i;
 
     if (!st->enabled) return 0;
-    if (!st->hello_sent || (!st->ready && now - st->last_hello_ms >= KC_HPM_STREAM_HELLO_MS)) {
-        return kc_hpm_stream_send_hello(ctx, fd, peer_addr, st,
-            KC_HPM_STREAM_TYPE_HELLO);
+    if (!st->hello_sent || (!st->ready && now - st->last_hello_ms >= KC_P2P_STREAM_HELLO_MS)) {
+        return kc_p2p_stream_send_hello(ctx, fd, peer_addr, st,
+            KC_P2P_STREAM_TYPE_HELLO);
     }
 
-    for (i = 0; i < KC_HPM_STREAM_SEND_WINDOW; i++) {
-        kc_hpm_stream_send_slot_t *slot = &st->out.slots[i];
+    for (i = 0; i < KC_P2P_STREAM_SEND_WINDOW; i++) {
+        kc_p2p_stream_send_slot_t *slot = &st->out.slots[i];
         if (!slot->used) continue;
-        if (now - slot->last_tx_ms < KC_HPM_STREAM_RTO_MS) continue;
-        if (slot->attempts >= KC_HPM_STREAM_MAX_RETRIES) return -1;
-        kc_hpm_stream_log("hpm: stream retransmit seq=%u\n",
+        if (now - slot->last_tx_ms < KC_P2P_STREAM_RTO_MS) continue;
+        if (slot->attempts >= KC_P2P_STREAM_MAX_RETRIES) return -1;
+        kc_p2p_stream_log("p2p: stream retransmit seq=%u\n",
             (unsigned)slot->seq);
-        if (kc_hpm_stream_send_raw(ctx, fd, peer_addr, slot->frame,
+        if (kc_p2p_stream_send_raw(ctx, fd, peer_addr, slot->frame,
             slot->frame_len) != 0)
             return -1;
         slot->attempts++;
@@ -1675,13 +1675,13 @@ static int kc_hpm_stream_tick(kc_hpm_t *ctx, kc_hpm_fd_t fd,
         st->last_tx_ms = now;
     }
 
-    if (st->ready && now - st->last_ack_ms >= KC_HPM_STREAM_ACK_MS) {
-        if (kc_hpm_stream_send_control(ctx, fd, peer_addr, st,
-            KC_HPM_STREAM_TYPE_ACK, 0,
+    if (st->ready && now - st->last_ack_ms >= KC_P2P_STREAM_ACK_MS) {
+        if (kc_p2p_stream_send_control(ctx, fd, peer_addr, st,
+            KC_P2P_STREAM_TYPE_ACK, 0,
             0, 0) != 0)
             return -1;
     }
-    if (st->ready && now - st->last_rx_ms >= KC_HPM_STREAM_IDLE_MS)
+    if (st->ready && now - st->last_rx_ms >= KC_P2P_STREAM_IDLE_MS)
         return -1;
     return 0;
 }
@@ -1690,16 +1690,16 @@ static int kc_hpm_stream_tick(kc_hpm_t *ctx, kc_hpm_fd_t fd,
  * Reports whether one TCP stream is fully closed on both sides.
  * @return 1 when the stream may be cleaned up, 0 otherwise.
  */
-static int kc_hpm_stream_is_done(const kc_hpm_stream_state_t *st) {
+static int kc_p2p_stream_is_done(const kc_p2p_stream_state_t *st) {
     return st->out.local_eof && st->out.fin_acked && st->in.remote_fin &&
-        kc_hpm_stream_inflight(st) == 0;
+        kc_p2p_stream_inflight(st) == 0;
 }
 
 /**
  * Wipes all per-session stream material.
  * @return None.
  */
-static void kc_hpm_stream_wipe(kc_hpm_stream_state_t *st) {
+static void kc_p2p_stream_wipe(kc_p2p_stream_state_t *st) {
     crypto_wipe(st, sizeof(*st));
 }
 
@@ -1707,17 +1707,17 @@ static void kc_hpm_stream_wipe(kc_hpm_stream_state_t *st) {
  * Closes one publisher-side UDP session and wipes TCP stream state.
  * @return None.
  */
-static void kc_hpm_server_session_close(kc_hpm_udp_server_session_t *sess) {
+static void kc_p2p_server_session_close(kc_p2p_udp_server_session_t *sess) {
     if (!sess) return;
-    if (sess->backend_fd != KC_HPM_FD_INVALID) {
-        KC_HPM_FD_CLOSE(sess->backend_fd);
-        sess->backend_fd = KC_HPM_FD_INVALID;
+    if (sess->backend_fd != KC_P2P_FD_INVALID) {
+        KC_P2P_FD_CLOSE(sess->backend_fd);
+        sess->backend_fd = KC_P2P_FD_INVALID;
     }
-    if (sess->tcp_fd != KC_HPM_FD_INVALID) {
-        KC_HPM_FD_CLOSE(sess->tcp_fd);
-        sess->tcp_fd = KC_HPM_FD_INVALID;
+    if (sess->tcp_fd != KC_P2P_FD_INVALID) {
+        KC_P2P_FD_CLOSE(sess->tcp_fd);
+        sess->tcp_fd = KC_P2P_FD_INVALID;
     }
-    if (sess->is_tcp) kc_hpm_stream_wipe(&sess->stream);
+    if (sess->is_tcp) kc_p2p_stream_wipe(&sess->stream);
     sess->active = 0;
 }
 
@@ -1725,17 +1725,17 @@ static void kc_hpm_server_session_close(kc_hpm_udp_server_session_t *sess) {
  * Closes one consumer-side UDP session and wipes TCP stream state.
  * @return None.
  */
-static void kc_hpm_consumer_session_close(kc_hpm_udp_consumer_session_t *sess) {
+static void kc_p2p_consumer_session_close(kc_p2p_udp_consumer_session_t *sess) {
     if (!sess) return;
-    if (sess->tcp_fd != KC_HPM_FD_INVALID) {
-        KC_HPM_FD_CLOSE(sess->tcp_fd);
-        sess->tcp_fd = KC_HPM_FD_INVALID;
+    if (sess->tcp_fd != KC_P2P_FD_INVALID) {
+        KC_P2P_FD_CLOSE(sess->tcp_fd);
+        sess->tcp_fd = KC_P2P_FD_INVALID;
     }
-    if (!KC_HPM_ISERR(sess->fd)) {
-        KC_HPM_FD_CLOSE(sess->fd);
-        sess->fd = KC_HPM_FD_INVALID;
+    if (!KC_P2P_ISERR(sess->fd)) {
+        KC_P2P_FD_CLOSE(sess->fd);
+        sess->fd = KC_P2P_FD_INVALID;
     }
-    if (sess->is_tcp) kc_hpm_stream_wipe(&sess->stream);
+    if (sess->is_tcp) kc_p2p_stream_wipe(&sess->stream);
     sess->active = 0;
 }
 
@@ -1748,9 +1748,9 @@ static void kc_hpm_consumer_session_close(kc_hpm_udp_consumer_session_t *sess) {
  * Signal handler.
  * @return Status code.
  */
-static void kc_hpm_signal_handler(int sig) {
+static void kc_p2p_signal_handler(int sig) {
     if (g_signal_ctx) {
-        if (kc_hpm_raise_signal(g_signal_ctx, sig) > 0)
+        if (kc_p2p_raise_signal(g_signal_ctx, sig) > 0)
             return;
     }
     signal(sig, SIG_DFL);
@@ -1766,15 +1766,15 @@ static void kc_hpm_signal_handler(int sig) {
  * On signal.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_on_signal(
-    kc_hpm_t *ctx,
+int kc_p2p_on_signal(
+    kc_p2p_t *ctx,
     int sig,
-    kc_hpm_signal_callback_t cb)
+    kc_p2p_signal_callback_t cb)
 {
-    kc_hpm_signal_entry_t *new_entries;
+    kc_p2p_signal_entry_t *new_entries;
     int i;
 
-    if (!ctx) return KC_HPM_ERROR;
+    if (!ctx) return KC_P2P_ERROR;
 
     if (!cb) {
         for (i = 0; i < ctx->signal_count; i++) {
@@ -1782,20 +1782,20 @@ int kc_hpm_on_signal(
                 ctx->signal_entries[i] =
                     ctx->signal_entries[ctx->signal_count - 1];
                 ctx->signal_count--;
-                return KC_HPM_OK;
+                return KC_P2P_OK;
             }
         }
-        return KC_HPM_ENOENT;
+        return KC_P2P_ENOENT;
     }
 
     if (ctx->signal_count >= ctx->signal_capacity) {
         int new_cap = ctx->signal_capacity
                     ? ctx->signal_capacity * 2
                     : 4;
-        new_entries = (kc_hpm_signal_entry_t *)realloc(
+        new_entries = (kc_p2p_signal_entry_t *)realloc(
             ctx->signal_entries,
-            (size_t)new_cap * sizeof(kc_hpm_signal_entry_t));
-        if (!new_entries) return KC_HPM_ERROR;
+            (size_t)new_cap * sizeof(kc_p2p_signal_entry_t));
+        if (!new_entries) return KC_P2P_ERROR;
         ctx->signal_entries = new_entries;
         ctx->signal_capacity = new_cap;
     }
@@ -1803,7 +1803,7 @@ int kc_hpm_on_signal(
     ctx->signal_entries[ctx->signal_count].sig = sig;
     ctx->signal_entries[ctx->signal_count].cb = cb;
     ctx->signal_count++;
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -1815,7 +1815,7 @@ int kc_hpm_on_signal(
  * Raise signal.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_raise_signal(kc_hpm_t *ctx, int sig) {
+int kc_p2p_raise_signal(kc_p2p_t *ctx, int sig) {
     int i;
     int count = 0;
     if (!ctx) return 0;
@@ -1837,10 +1837,10 @@ int kc_hpm_raise_signal(kc_hpm_t *ctx, int sig) {
  * Listen signals.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_listen_signals(kc_hpm_t *ctx) {
-    if (!ctx) return KC_HPM_ERROR;
+int kc_p2p_listen_signals(kc_p2p_t *ctx) {
+    if (!ctx) return KC_P2P_ERROR;
     g_signal_ctx = ctx;
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -1852,17 +1852,17 @@ int kc_hpm_listen_signals(kc_hpm_t *ctx) {
  * Listen signal.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_listen_signal(kc_hpm_t *ctx, int sig_id) {
+int kc_p2p_listen_signal(kc_p2p_t *ctx, int sig_id) {
     (void)ctx;
-    signal(sig_id, kc_hpm_signal_handler);
-    return KC_HPM_OK;
+    signal(sig_id, kc_p2p_signal_handler);
+    return KC_P2P_OK;
 }
 
 /**
  * Signal listener thread entry point.
  * @return NULL.
  */
-void *kc_hpm_signal_listener(void *arg) {
+void *kc_p2p_signal_listener(void *arg) {
     (void)arg;
     return NULL;
 }
@@ -1878,7 +1878,7 @@ void *kc_hpm_signal_listener(void *arg) {
  * Platform init.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_platform_init(void) {
+int kc_p2p_platform_init(void) {
     WSADATA w;
     return WSAStartup(MAKEWORD(2, 2), &w) == 0 ? 0 : -1;
 }
@@ -1892,7 +1892,7 @@ int kc_hpm_platform_init(void) {
  * Platform cleanup.
  * @return None.
  */
-void kc_hpm_platform_cleanup(void) { WSACleanup(); }
+void kc_p2p_platform_cleanup(void) { WSACleanup(); }
 
 #else
 
@@ -1900,7 +1900,7 @@ void kc_hpm_platform_cleanup(void) { WSACleanup(); }
  * Platform init.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_platform_init(void) { return 0; }
+int kc_p2p_platform_init(void) { return 0; }
 
 /**
  * platform cleanup.
@@ -1911,7 +1911,7 @@ int kc_hpm_platform_init(void) { return 0; }
  * Platform cleanup.
  * @return None.
  */
-void kc_hpm_platform_cleanup(void) {}
+void kc_p2p_platform_cleanup(void) {}
 
 #endif
 
@@ -1919,7 +1919,7 @@ void kc_hpm_platform_cleanup(void) {}
  * Set nonblock.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_set_nonblock(kc_hpm_fd_t fd) {
+int kc_p2p_set_nonblock(kc_p2p_fd_t fd) {
 #ifdef _WIN32
     u_long mode = 1;
     return ioctlsocket(fd, FIONBIO, &mode) == 0 ? 0 : -1;
@@ -1938,7 +1938,7 @@ int kc_hpm_set_nonblock(kc_hpm_fd_t fd) {
  * Set block.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_set_block(kc_hpm_fd_t fd) {
+int kc_p2p_set_block(kc_p2p_fd_t fd) {
 #ifdef _WIN32
     u_long mode = 0;
     return ioctlsocket(fd, FIONBIO, &mode) == 0 ? 0 : -1;
@@ -1957,7 +1957,7 @@ int kc_hpm_set_block(kc_hpm_fd_t fd) {
  * Resolve.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_resolve(
+int kc_p2p_resolve(
     const char *host,
     unsigned short port,
     int socktype,
@@ -1988,7 +1988,7 @@ int kc_hpm_resolve(
  * Extract addr.
  * @return None.
  */
-void kc_hpm_extract_addr(
+void kc_p2p_extract_addr(
     const struct sockaddr_in *from,
     char *out,
     size_t out_cap,
@@ -2013,15 +2013,15 @@ void kc_hpm_extract_addr(
  * Send reply.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_send_reply(
-    kc_hpm_fd_t fd,
+int kc_p2p_send_reply(
+    kc_p2p_fd_t fd,
     const struct sockaddr_in *to,
     socklen_t tolen,
     const char *msg)
 {
     return sendto(fd, msg, strlen(msg), 0,
         (const struct sockaddr *)to, tolen) > 0
-        ? KC_HPM_OK : KC_HPM_ENET;
+        ? KC_P2P_OK : KC_P2P_ENET;
 }
 
 /**
@@ -2033,8 +2033,8 @@ int kc_hpm_send_reply(
  * Send recv.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_send_recv(
-    kc_hpm_fd_t fd,
+int kc_p2p_send_recv(
+    kc_p2p_fd_t fd,
     const char *srv_host,
     unsigned short srv_port,
     const char *send_msg,
@@ -2049,14 +2049,14 @@ int kc_hpm_send_recv(
     int n;
     struct sockaddr_in from;
 
-    if (kc_hpm_resolve(srv_host, srv_port, SOCK_DGRAM, &srv) != 0)
-        return KC_HPM_ENET;
+    if (kc_p2p_resolve(srv_host, srv_port, SOCK_DGRAM, &srv) != 0)
+        return KC_P2P_ENET;
 
     if (sendto(fd, send_msg, strlen(send_msg), 0,
         (const struct sockaddr *)&srv, sizeof(srv)) < 0)
-        return KC_HPM_ENET;
+        return KC_P2P_ENET;
 
-    if (!recv_buf || recv_cap == 0) return KC_HPM_OK;
+    if (!recv_buf || recv_cap == 0) return KC_P2P_OK;
 
     FD_ZERO(&fds);
     FD_SET(fd, &fds);
@@ -2064,14 +2064,14 @@ int kc_hpm_send_recv(
     tv.tv_usec = 0;
 
     n = select((int)(fd + 1), &fds, NULL, NULL, &tv);
-    if (n <= 0) return KC_HPM_ETIMEOUT;
+    if (n <= 0) return KC_P2P_ETIMEOUT;
 
     srclen = sizeof(from);
     n = (int)recvfrom(fd, recv_buf, (int)(recv_cap - 1), 0,
         (struct sockaddr *)&from, &srclen);
-    if (n < 0) return KC_HPM_ENET;
+    if (n < 0) return KC_P2P_ENET;
     recv_buf[n] = '\0';
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -2083,16 +2083,16 @@ int kc_hpm_send_recv(
  * Create socket.
  * @return 0 on success, -1 on error.
  */
-kc_hpm_fd_t kc_hpm_create_socket(
+kc_p2p_fd_t kc_p2p_create_socket(
     const char *bind_host,
     unsigned short bind_port)
 {
-    kc_hpm_fd_t fd;
+    kc_p2p_fd_t fd;
     struct addrinfo hints;
     struct addrinfo *ai;
     char port_str[16];
 
-    if (kc_hpm_platform_init() != 0) return KC_HPM_FD_INVALID;
+    if (kc_p2p_platform_init() != 0) return KC_P2P_FD_INVALID;
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
@@ -2101,12 +2101,12 @@ kc_hpm_fd_t kc_hpm_create_socket(
 
     snprintf(port_str, sizeof(port_str), "%u", (unsigned)bind_port);
     if (getaddrinfo(bind_host, port_str, &hints, &ai) != 0)
-        return KC_HPM_FD_INVALID;
+        return KC_P2P_FD_INVALID;
 
     fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-    if (KC_HPM_ISERR(fd)) {
+    if (KC_P2P_ISERR(fd)) {
         freeaddrinfo(ai);
-        return KC_HPM_FD_INVALID;
+        return KC_P2P_FD_INVALID;
     }
 
     {
@@ -2116,9 +2116,9 @@ kc_hpm_fd_t kc_hpm_create_socket(
     }
 
     if (bind(fd, ai->ai_addr, (socklen_t)ai->ai_addrlen) == SOCKET_ERROR) {
-        KC_HPM_FD_CLOSE(fd);
+        KC_P2P_FD_CLOSE(fd);
         freeaddrinfo(ai);
-        return KC_HPM_FD_INVALID;
+        return KC_P2P_FD_INVALID;
     }
 
     freeaddrinfo(ai);
@@ -2134,11 +2134,11 @@ kc_hpm_fd_t kc_hpm_create_socket(
  * Create tcp listener.
  * @return 0 on success, -1 on error.
  */
-static kc_hpm_fd_t kc_hpm_create_tcp_listener(
+static kc_p2p_fd_t kc_p2p_create_tcp_listener(
     const char *bind_host,
     unsigned short bind_port)
 {
-    kc_hpm_fd_t fd;
+    kc_p2p_fd_t fd;
     struct addrinfo hints;
     struct addrinfo *ai;
     char port_str[16];
@@ -2149,11 +2149,11 @@ static kc_hpm_fd_t kc_hpm_create_tcp_listener(
     hints.ai_flags = AI_PASSIVE;
     snprintf(port_str, sizeof(port_str), "%u", (unsigned)bind_port);
     if (getaddrinfo(bind_host, port_str, &hints, &ai) != 0)
-        return KC_HPM_FD_INVALID;
+        return KC_P2P_FD_INVALID;
     fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-    if (KC_HPM_ISERR(fd)) {
+    if (KC_P2P_ISERR(fd)) {
         freeaddrinfo(ai);
-        return KC_HPM_FD_INVALID;
+        return KC_P2P_FD_INVALID;
     }
     {
         int reuse = 1;
@@ -2161,14 +2161,14 @@ static kc_hpm_fd_t kc_hpm_create_tcp_listener(
             (void *)&reuse, sizeof(reuse));
     }
     if (bind(fd, ai->ai_addr, (socklen_t)ai->ai_addrlen) == SOCKET_ERROR) {
-        KC_HPM_FD_CLOSE(fd);
+        KC_P2P_FD_CLOSE(fd);
         freeaddrinfo(ai);
-        return KC_HPM_FD_INVALID;
+        return KC_P2P_FD_INVALID;
     }
     if (listen(fd, 32) == SOCKET_ERROR) {
-        KC_HPM_FD_CLOSE(fd);
+        KC_P2P_FD_CLOSE(fd);
         freeaddrinfo(ai);
-        return KC_HPM_FD_INVALID;
+        return KC_P2P_FD_INVALID;
     }
     freeaddrinfo(ai);
     return fd;
@@ -2183,19 +2183,19 @@ static kc_hpm_fd_t kc_hpm_create_tcp_listener(
  * Connect local tcp.
  * @return 0 on success, -1 on error.
  */
-static kc_hpm_fd_t kc_hpm_connect_local_tcp(unsigned short port) {
-    kc_hpm_fd_t fd;
+static kc_p2p_fd_t kc_p2p_connect_local_tcp(unsigned short port) {
+    kc_p2p_fd_t fd;
     struct sockaddr_in addr;
 
     fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (KC_HPM_ISERR(fd)) return KC_HPM_FD_INVALID;
+    if (KC_P2P_ISERR(fd)) return KC_P2P_FD_INVALID;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
     if (connect(fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        KC_HPM_FD_CLOSE(fd);
-        return KC_HPM_FD_INVALID;
+        KC_P2P_FD_CLOSE(fd);
+        return KC_P2P_FD_INVALID;
     }
     return fd;
 }
@@ -2209,7 +2209,7 @@ static kc_hpm_fd_t kc_hpm_connect_local_tcp(unsigned short port) {
  * Sock read.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_sock_read(kc_hpm_fd_t fd, char *buf, int len) {
+static int kc_p2p_sock_read(kc_p2p_fd_t fd, char *buf, int len) {
 #ifdef _WIN32
     return recv(fd, buf, len, 0);
 #else
@@ -2226,7 +2226,7 @@ static int kc_hpm_sock_read(kc_hpm_fd_t fd, char *buf, int len) {
  * Sock write.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_sock_write(kc_hpm_fd_t fd, const char *buf, int len) {
+static int kc_p2p_sock_write(kc_p2p_fd_t fd, const char *buf, int len) {
 #ifdef _WIN32
     return send(fd, buf, len, 0);
 #else
@@ -2243,13 +2243,13 @@ static int kc_hpm_sock_write(kc_hpm_fd_t fd, const char *buf, int len) {
  * Write all.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_write_all(kc_hpm_fd_t fd, const char *buf, int len) {
+static int kc_p2p_write_all(kc_p2p_fd_t fd, const char *buf, int len) {
     int off;
     int n;
 
     off = 0;
     while (off < len) {
-        n = kc_hpm_sock_write(fd, buf + off, len - off);
+        n = kc_p2p_sock_write(fd, buf + off, len - off);
         if (n <= 0) return -1;
         off += n;
     }
@@ -2260,7 +2260,7 @@ static int kc_hpm_write_all(kc_hpm_fd_t fd, const char *buf, int len) {
  * Shuts down the local write side of one TCP socket.
  * @return None.
  */
-static void kc_hpm_shutdown_write(kc_hpm_fd_t fd) {
+static void kc_p2p_shutdown_write(kc_p2p_fd_t fd) {
 #ifdef _WIN32
     shutdown(fd, SD_SEND);
 #else
@@ -2277,21 +2277,21 @@ static void kc_hpm_shutdown_write(kc_hpm_fd_t fd) {
  * Tcp connect.
  * @return 0 on success, -1 on error.
  */
-static kc_hpm_fd_t kc_hpm_tcp_connect(const char *host, unsigned short port) {
-    kc_hpm_fd_t fd;
+static kc_p2p_fd_t kc_p2p_tcp_connect(const char *host, unsigned short port) {
+    kc_p2p_fd_t fd;
     struct sockaddr_in addr;
 
     fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (KC_HPM_ISERR(fd)) return KC_HPM_FD_INVALID;
+    if (KC_P2P_ISERR(fd)) return KC_P2P_FD_INVALID;
 
-    if (kc_hpm_resolve(host, port, SOCK_STREAM, &addr) != 0) {
-        KC_HPM_FD_CLOSE(fd);
-        return KC_HPM_FD_INVALID;
+    if (kc_p2p_resolve(host, port, SOCK_STREAM, &addr) != 0) {
+        KC_P2P_FD_CLOSE(fd);
+        return KC_P2P_FD_INVALID;
     }
 
     if (connect(fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        KC_HPM_FD_CLOSE(fd);
-        return KC_HPM_FD_INVALID;
+        KC_P2P_FD_CLOSE(fd);
+        return KC_P2P_FD_INVALID;
     }
     return fd;
 }
@@ -2305,12 +2305,12 @@ static kc_hpm_fd_t kc_hpm_tcp_connect(const char *host, unsigned short port) {
  * Tcp send.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_tcp_send(kc_hpm_fd_t fd, const char *msg) {
+static int kc_p2p_tcp_send(kc_p2p_fd_t fd, const char *msg) {
     int len = (int)strlen(msg);
 
-    if (kc_hpm_write_all(fd, msg, len) != 0) return KC_HPM_ENET;
-    if (kc_hpm_write_all(fd, "\n", 1) != 0) return KC_HPM_ENET;
-    return KC_HPM_OK;
+    if (kc_p2p_write_all(fd, msg, len) != 0) return KC_P2P_ENET;
+    if (kc_p2p_write_all(fd, "\n", 1) != 0) return KC_P2P_ENET;
+    return KC_P2P_OK;
 }
 
 /**
@@ -2322,10 +2322,10 @@ static int kc_hpm_tcp_send(kc_hpm_fd_t fd, const char *msg) {
  * Tcp readline.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_tcp_readline(kc_hpm_fd_t fd, char *buf, int cap, int timeout_sec) {
+static int kc_p2p_tcp_readline(kc_p2p_fd_t fd, char *buf, int cap, int timeout_sec) {
     int total = 0;
     int n;
-    char tmp[KC_HPM_BUF];
+    char tmp[KC_P2P_BUF];
 
     if (cap < 1) return -1;
 
@@ -2344,7 +2344,7 @@ static int kc_hpm_tcp_readline(kc_hpm_fd_t fd, char *buf, int cap, int timeout_s
             return -1;
         }
 
-        n = kc_hpm_sock_read(fd, tmp, 1);
+        n = kc_p2p_sock_read(fd, tmp, 1);
         if (n <= 0) {
             if (total > 0) { buf[total] = '\0'; return total; }
             return -1;
@@ -2364,7 +2364,7 @@ static int kc_hpm_tcp_readline(kc_hpm_fd_t fd, char *buf, int cap, int timeout_s
  * @param ch Input byte.
  * @return 1 when whitespace, 0 otherwise.
  */
-static int kc_hpm_is_space(char ch) {
+static int kc_p2p_is_space(char ch) {
     return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' ||
         ch == '\f' || ch == '\v';
 }
@@ -2374,12 +2374,12 @@ static int kc_hpm_is_space(char ch) {
  * @param id Identifier to validate.
  * @return 1 when valid, 0 otherwise.
  */
-int kc_hpm_is_valid_id(const char *id) {
+int kc_p2p_is_valid_id(const char *id) {
     size_t i;
 
     if (!id || !id[0]) return 0;
     for (i = 0; id[i]; i++) {
-        if (i >= KC_HPM_ID_MAX) return 0;
+        if (i >= KC_P2P_ID_MAX) return 0;
         if (!((id[i] >= 'a' && id[i] <= 'z') ||
             (id[i] >= 'A' && id[i] <= 'Z') ||
             (id[i] >= '0' && id[i] <= '9')))
@@ -2393,7 +2393,7 @@ int kc_hpm_is_valid_id(const char *id) {
  * @param ch Input byte.
  * @return 1 when allowed, 0 otherwise.
  */
-static int kc_hpm_is_pass_char(char ch) {
+static int kc_p2p_is_pass_char(char ch) {
     if (ch >= 'a' && ch <= 'z') return 1;
     if (ch >= 'A' && ch <= 'Z') return 1;
     if (ch >= '0' && ch <= '9') return 1;
@@ -2407,13 +2407,13 @@ static int kc_hpm_is_pass_char(char ch) {
  * @param pass Password token to validate.
  * @return 1 when valid, 0 otherwise.
  */
-int kc_hpm_is_valid_pass_token(const char *pass) {
+int kc_p2p_is_valid_pass_token(const char *pass) {
     size_t i;
 
     if (!pass || !pass[0]) return 0;
     for (i = 0; pass[i]; i++) {
-        if (i >= KC_HPM_PASS_MAX) return 0;
-        if (!kc_hpm_is_pass_char(pass[i])) return 0;
+        if (i >= KC_P2P_PASS_MAX) return 0;
+        if (!kc_p2p_is_pass_char(pass[i])) return 0;
     }
     return 1;
 }
@@ -2423,13 +2423,13 @@ int kc_hpm_is_valid_pass_token(const char *pass) {
  * @param text Mutable string buffer.
  * @return Pointer to the first non-whitespace byte.
  */
-static char *kc_hpm_trim(char *text) {
+static char *kc_p2p_trim(char *text) {
     char *end;
 
     if (!text) return NULL;
-    while (*text && kc_hpm_is_space(*text)) text++;
+    while (*text && kc_p2p_is_space(*text)) text++;
     end = text + strlen(text);
-    while (end > text && kc_hpm_is_space(end[-1])) end--;
+    while (end > text && kc_p2p_is_space(end[-1])) end--;
     *end = '\0';
     return text;
 }
@@ -2440,7 +2440,7 @@ static char *kc_hpm_trim(char *text) {
  * @param id Reserved seat identifier.
  * @return VIP index on success, -1 when missing.
  */
-static int kc_hpm_find_vip(kc_hpm_t *ctx, const char *id) {
+static int kc_p2p_find_vip(kc_p2p_t *ctx, const char *id) {
     int i;
 
     if (!ctx || !id) return -1;
@@ -2455,7 +2455,7 @@ static int kc_hpm_find_vip(kc_hpm_t *ctx, const char *id) {
  * @param ctx Open context.
  * @return None.
  */
-static void kc_hpm_update_nonvip_cap(kc_hpm_t *ctx) {
+static void kc_p2p_update_nonvip_cap(kc_p2p_t *ctx) {
     if (!ctx) return;
     ctx->nonvip_cap = ctx->n_peers_cap - ctx->n_vips;
     if (ctx->nonvip_cap < 0) ctx->nonvip_cap = 0;
@@ -2465,22 +2465,22 @@ static void kc_hpm_update_nonvip_cap(kc_hpm_t *ctx) {
  * Ensures peer storage can hold the requested number of online peers.
  * @param ctx  Open context.
  * @param need Required peer slots.
- * @return KC_HPM_OK on success, KC_HPM_ERROR on allocation failure.
+ * @return KC_P2P_OK on success, KC_P2P_ERROR on allocation failure.
  */
-static int kc_hpm_ensure_peer_storage(kc_hpm_t *ctx, int need) {
-    kc_hpm_peer_t *peers;
+static int kc_p2p_ensure_peer_storage(kc_p2p_t *ctx, int need) {
+    kc_p2p_peer_t *peers;
     int cap;
 
-    if (!ctx) return KC_HPM_ERROR;
-    if (need <= ctx->peers_alloc) return KC_HPM_OK;
+    if (!ctx) return KC_P2P_ERROR;
+    if (need <= ctx->peers_alloc) return KC_P2P_OK;
     cap = ctx->peers_alloc > 0 ? ctx->peers_alloc : 8;
     while (cap < need) cap *= 2;
-    peers = (kc_hpm_peer_t *)realloc(ctx->peers,
-        (size_t)cap * sizeof(kc_hpm_peer_t));
-    if (!peers) return KC_HPM_ERROR;
+    peers = (kc_p2p_peer_t *)realloc(ctx->peers,
+        (size_t)cap * sizeof(kc_p2p_peer_t));
+    if (!peers) return KC_P2P_ERROR;
     ctx->peers = peers;
     ctx->peers_alloc = cap;
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -2488,14 +2488,14 @@ static int kc_hpm_ensure_peer_storage(kc_hpm_t *ctx, int need) {
  * @param ctx Open context.
  * @return Number of online non-VIP peers.
  */
-static int kc_hpm_count_nonvip_peers(kc_hpm_t *ctx) {
+static int kc_p2p_count_nonvip_peers(kc_p2p_t *ctx) {
     int i;
     int count;
 
     if (!ctx) return 0;
     count = 0;
     for (i = 0; i < ctx->n_peers; i++) {
-        if (kc_hpm_find_vip(ctx, ctx->peers[i].id) < 0) count++;
+        if (kc_p2p_find_vip(ctx, ctx->peers[i].id) < 0) count++;
     }
     return count;
 }
@@ -2507,48 +2507,48 @@ static int kc_hpm_count_nonvip_peers(kc_hpm_t *ctx) {
  * @param pass Reserved seat password.
  * @param err Output error buffer.
  * @param err_cap Output error buffer capacity.
- * @return KC_HPM_OK on success, KC_HPM_ERROR on validation failure.
+ * @return KC_P2P_OK on success, KC_P2P_ERROR on validation failure.
  */
-static int kc_hpm_add_vip(kc_hpm_t *ctx, const char *id, const char *pass,
+static int kc_p2p_add_vip(kc_p2p_t *ctx, const char *id, const char *pass,
     char *err, size_t err_cap)
 {
-    kc_hpm_vip_entry_t *vips;
+    kc_p2p_vip_entry_t *vips;
     int cap;
 
-    if (!ctx || !id || !pass) return KC_HPM_ERROR;
-    if (!kc_hpm_is_valid_id(id)) {
+    if (!ctx || !id || !pass) return KC_P2P_ERROR;
+    if (!kc_p2p_is_valid_id(id)) {
         if (err && err_cap > 0)
-            snprintf(err, err_cap, "HPM_VIP invalid id '%s'", id);
-        return KC_HPM_ERROR;
+            snprintf(err, err_cap, "P2P_VIP invalid id '%s'", id);
+        return KC_P2P_ERROR;
     }
-    if (!kc_hpm_is_valid_pass_token(pass)) {
+    if (!kc_p2p_is_valid_pass_token(pass)) {
         if (err && err_cap > 0)
-            snprintf(err, err_cap, "HPM_VIP invalid password for id '%s'", id);
-        return KC_HPM_ERROR;
+            snprintf(err, err_cap, "P2P_VIP invalid password for id '%s'", id);
+        return KC_P2P_ERROR;
     }
-    if (kc_hpm_find_vip(ctx, id) >= 0) {
+    if (kc_p2p_find_vip(ctx, id) >= 0) {
         if (err && err_cap > 0)
-            snprintf(err, err_cap, "HPM_VIP redefines reserved id '%s'", id);
-        return KC_HPM_ERROR;
+            snprintf(err, err_cap, "P2P_VIP redefines reserved id '%s'", id);
+        return KC_P2P_ERROR;
     }
     if (ctx->n_vips >= ctx->vips_cap) {
         cap = ctx->vips_cap > 0 ? ctx->vips_cap * 2 : 8;
-        vips = (kc_hpm_vip_entry_t *)realloc(ctx->vips,
-            (size_t)cap * sizeof(kc_hpm_vip_entry_t));
+        vips = (kc_p2p_vip_entry_t *)realloc(ctx->vips,
+            (size_t)cap * sizeof(kc_p2p_vip_entry_t));
         if (!vips) {
             if (err && err_cap > 0)
-                snprintf(err, err_cap, "failed to allocate HPM_VIP table");
-            return KC_HPM_ERROR;
+                snprintf(err, err_cap, "failed to allocate P2P_VIP table");
+            return KC_P2P_ERROR;
         }
         ctx->vips = vips;
         ctx->vips_cap = cap;
     }
-    strncpy(ctx->vips[ctx->n_vips].id, id, KC_HPM_ID_MAX);
-    ctx->vips[ctx->n_vips].id[KC_HPM_ID_MAX] = '\0';
-    strncpy(ctx->vips[ctx->n_vips].pass, pass, KC_HPM_PASS_MAX);
-    ctx->vips[ctx->n_vips].pass[KC_HPM_PASS_MAX] = '\0';
+    strncpy(ctx->vips[ctx->n_vips].id, id, KC_P2P_ID_MAX);
+    ctx->vips[ctx->n_vips].id[KC_P2P_ID_MAX] = '\0';
+    strncpy(ctx->vips[ctx->n_vips].pass, pass, KC_P2P_PASS_MAX);
+    ctx->vips[ctx->n_vips].pass[KC_P2P_PASS_MAX] = '\0';
     ctx->n_vips++;
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -2557,11 +2557,11 @@ static int kc_hpm_add_vip(kc_hpm_t *ctx, const char *id, const char *pass,
  * @param id Service identifier.
  * @return VIP password when reserved, otherwise the global password.
  */
-static const char *kc_hpm_get_register_pass(kc_hpm_t *ctx, const char *id) {
+static const char *kc_p2p_get_register_pass(kc_p2p_t *ctx, const char *id) {
     int idx;
 
     if (!ctx) return "";
-    idx = kc_hpm_find_vip(ctx, id);
+    idx = kc_p2p_find_vip(ctx, id);
     if (idx >= 0) return ctx->vips[idx].pass;
     return ctx->pass;
 }
@@ -2575,30 +2575,30 @@ static const char *kc_hpm_get_register_pass(kc_hpm_t *ctx, const char *id) {
  * Open.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_open(kc_hpm_t **out) {
-    kc_hpm_t *ctx;
-    kc_hpm_peer_t *p;
+int kc_p2p_open(kc_p2p_t **out) {
+    kc_p2p_t *ctx;
+    kc_p2p_peer_t *p;
 
-    if (!out) return KC_HPM_ERROR;
-    ctx = (kc_hpm_t *)calloc(1, sizeof(kc_hpm_t));
-    if (!ctx) return KC_HPM_ERROR;
-    p = (kc_hpm_peer_t *)calloc((size_t)KC_HPM_MAX_PEERS, sizeof(kc_hpm_peer_t));
+    if (!out) return KC_P2P_ERROR;
+    ctx = (kc_p2p_t *)calloc(1, sizeof(kc_p2p_t));
+    if (!ctx) return KC_P2P_ERROR;
+    p = (kc_p2p_peer_t *)calloc((size_t)KC_P2P_MAX_PEERS, sizeof(kc_p2p_peer_t));
     if (!p) {
         free(ctx);
-        return KC_HPM_ERROR;
+        return KC_P2P_ERROR;
     }
     ctx->peers = p;
     ctx->n_peers = 0;
-    ctx->peers_alloc = KC_HPM_MAX_PEERS;
-    ctx->n_peers_cap = KC_HPM_MAX_PEERS;
-    ctx->nonvip_cap = KC_HPM_MAX_PEERS;
+    ctx->peers_alloc = KC_P2P_MAX_PEERS;
+    ctx->n_peers_cap = KC_P2P_MAX_PEERS;
+    ctx->nonvip_cap = KC_P2P_MAX_PEERS;
     ctx->signal_entries = NULL;
     ctx->signal_count = 0;
     ctx->signal_capacity = 0;
     ctx->pass[0] = '\0';
     ctx->pow_bits = 0;
-    ctx->bind_port = KC_HPM_BIND_PORT_DEFAULT;
-    ctx->proto = KC_HPM_PROTO_TCP;
+    ctx->bind_port = KC_P2P_BIND_PORT_DEFAULT;
+    ctx->proto = KC_P2P_PROTO_TCP;
     ctx->n_pow_challenges = 0;
     ctx->conns = NULL;
     ctx->n_conns = 0;
@@ -2613,7 +2613,7 @@ int kc_hpm_open(kc_hpm_t **out) {
 #endif
 
     *out = ctx;
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -2625,11 +2625,11 @@ int kc_hpm_open(kc_hpm_t **out) {
  * Close.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_close(kc_hpm_t *ctx) {
+int kc_p2p_close(kc_p2p_t *ctx) {
     int i;
-    if (!ctx) return KC_HPM_ERROR;
+    if (!ctx) return KC_P2P_ERROR;
     for (i = 0; i < ctx->n_conns; i++)
-        KC_HPM_FD_CLOSE(ctx->conns[i].fd);
+        KC_P2P_FD_CLOSE(ctx->conns[i].fd);
     free(ctx->conns);
     free(ctx->vips);
     free(ctx->signal_entries);
@@ -2640,21 +2640,21 @@ int kc_hpm_close(kc_hpm_t *ctx) {
     pthread_mutex_destroy(&ctx->mutex);
 #endif
     free(ctx);
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
  * Return string for status code.
  * @return Status string.
  */
-const char *kc_hpm_strerror(int code) {
+const char *kc_p2p_strerror(int code) {
     switch (code) {
-        case KC_HPM_OK:       return "OK";
-        case KC_HPM_ERROR:    return "general error";
-        case KC_HPM_ENET:     return "network error";
-        case KC_HPM_ENOENT:   return "peer not found";
-        case KC_HPM_ETIMEOUT: return "timeout";
-        case KC_HPM_EFULL:    return "peer table full";
+        case KC_P2P_OK:       return "OK";
+        case KC_P2P_ERROR:    return "general error";
+        case KC_P2P_ENET:     return "network error";
+        case KC_P2P_ENOENT:   return "peer not found";
+        case KC_P2P_ETIMEOUT: return "timeout";
+        case KC_P2P_EFULL:    return "peer table full";
         default:              return "unknown error";
     }
 }
@@ -2663,10 +2663,10 @@ const char *kc_hpm_strerror(int code) {
  * Options t.
  * @return Status code.
  */
-kc_hpm_options_t kc_hpm_options_default(void) {
-    kc_hpm_options_t opts;
+kc_p2p_options_t kc_p2p_options_default(void) {
+    kc_p2p_options_t opts;
     memset(&opts, 0, sizeof(opts));
-    opts.index_port = KC_HPM_PORT_DEFAULT;
+    opts.index_port = KC_P2P_PORT_DEFAULT;
     opts.pow = 0;
     opts.sweep = 20;
     return opts;
@@ -2681,13 +2681,13 @@ kc_hpm_options_t kc_hpm_options_default(void) {
  * Options load env.
  * @return None.
  */
-void kc_hpm_options_load_env(kc_hpm_options_t *opts) {
+void kc_p2p_options_load_env(kc_p2p_options_t *opts) {
     const char *val;
     char *colon;
 
     if (!opts) return;
 
-    val = getenv("HPM_INDEX");
+    val = getenv("P2P_INDEX");
     if (val) {
         colon = strchr(val, ':');
         if (colon) {
@@ -2700,7 +2700,7 @@ void kc_hpm_options_load_env(kc_hpm_options_t *opts) {
         }
     }
 
-    val = getenv("HPM_BIND");
+    val = getenv("P2P_BIND");
     if (val) {
         colon = strchr(val, ':');
         if (colon) {
@@ -2713,29 +2713,29 @@ void kc_hpm_options_load_env(kc_hpm_options_t *opts) {
         }
     }
 
-    val = getenv("HPM_SEATS");
+    val = getenv("P2P_SEATS");
     if (val) opts->seats = atoi(val);
 
-    val = getenv("HPM_POW");
+    val = getenv("P2P_POW");
     if (val) opts->pow = atoi(val);
 
-    val = getenv("HPM_PASS");
+    val = getenv("P2P_PASS");
     if (val) {
-        strncpy(opts->pass, val, KC_HPM_PASS_MAX);
-        opts->pass[KC_HPM_PASS_MAX] = '\0';
+        strncpy(opts->pass, val, KC_P2P_PASS_MAX);
+        opts->pass[KC_P2P_PASS_MAX] = '\0';
     }
 
-    val = getenv("HPM_VIP");
+    val = getenv("P2P_VIP");
     if (val) {
         size_t len = strlen(val);
         opts->vip = (char *)malloc(len + 1);
         if (opts->vip) memcpy(opts->vip, val, len + 1);
     }
 
-    val = getenv("HPM_SWEEP");
+    val = getenv("P2P_SWEEP");
     if (val) opts->sweep = atoi(val);
 
-    val = getenv("HPM_STUN");
+    val = getenv("P2P_STUN");
     if (val) {
         strncpy(opts->stun_url, val, sizeof(opts->stun_url) - 1);
         opts->stun_url[sizeof(opts->stun_url) - 1] = '\0';
@@ -2752,7 +2752,7 @@ void kc_hpm_options_load_env(kc_hpm_options_t *opts) {
  * Options free.
  * @return None.
  */
-void kc_hpm_options_free(kc_hpm_options_t *opts) {
+void kc_p2p_options_free(kc_p2p_options_t *opts) {
     if (!opts) return;
     free(opts->vip);
     opts->vip = NULL;
@@ -2762,13 +2762,13 @@ void kc_hpm_options_free(kc_hpm_options_t *opts) {
  * Set seats.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_set_seats(kc_hpm_t *ctx, int seats) {
+int kc_p2p_set_seats(kc_p2p_t *ctx, int seats) {
     int cap;
-    if (!ctx) return KC_HPM_ERROR;
-    cap = seats >= 0 ? seats : KC_HPM_MAX_PEERS;
+    if (!ctx) return KC_P2P_ERROR;
+    cap = seats >= 0 ? seats : KC_P2P_MAX_PEERS;
     ctx->n_peers_cap = cap;
-    kc_hpm_update_nonvip_cap(ctx);
-    return KC_HPM_OK;
+    kc_p2p_update_nonvip_cap(ctx);
+    return KC_P2P_OK;
 }
 
 /**
@@ -2780,11 +2780,11 @@ int kc_hpm_set_seats(kc_hpm_t *ctx, int seats) {
  * Set pow.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_set_pow(kc_hpm_t *ctx, int bits) {
-    if (!ctx) return KC_HPM_ERROR;
+int kc_p2p_set_pow(kc_p2p_t *ctx, int bits) {
+    if (!ctx) return KC_P2P_ERROR;
     if (bits < 0) bits = 0;
     ctx->pow_bits = bits;
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -2796,10 +2796,10 @@ int kc_hpm_set_pow(kc_hpm_t *ctx, int bits) {
  * Set port.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_set_port(kc_hpm_t *ctx, unsigned short port) {
-    if (!ctx) return KC_HPM_ERROR;
+int kc_p2p_set_port(kc_p2p_t *ctx, unsigned short port) {
+    if (!ctx) return KC_P2P_ERROR;
     ctx->bind_port = port;
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -2811,22 +2811,22 @@ int kc_hpm_set_port(kc_hpm_t *ctx, unsigned short port) {
  * Set protocol.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_set_protocol(kc_hpm_t *ctx, int proto) {
-    if (!ctx) return KC_HPM_ERROR;
-    if (proto != KC_HPM_PROTO_TCP && proto != KC_HPM_PROTO_UDP)
-        return KC_HPM_ERROR;
+int kc_p2p_set_protocol(kc_p2p_t *ctx, int proto) {
+    if (!ctx) return KC_P2P_ERROR;
+    if (proto != KC_P2P_PROTO_TCP && proto != KC_P2P_PROTO_UDP)
+        return KC_P2P_ERROR;
     ctx->proto = proto;
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
  * Set sweep count.
  * @return Status code.
  */
-int kc_hpm_set_sweep(kc_hpm_t *ctx, int sweep) {
-    if (!ctx) return KC_HPM_ERROR;
+int kc_p2p_set_sweep(kc_p2p_t *ctx, int sweep) {
+    if (!ctx) return KC_P2P_ERROR;
     ctx->sweep = sweep;
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -2835,12 +2835,12 @@ int kc_hpm_set_sweep(kc_hpm_t *ctx, int sweep) {
  * @param pass Shared password string.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_set_pass(kc_hpm_t *ctx, const char *pass) {
-    if (!ctx || !pass) return KC_HPM_ERROR;
-    if (pass[0] && !kc_hpm_is_valid_pass_token(pass)) return KC_HPM_ERROR;
-    strncpy(ctx->pass, pass, KC_HPM_PASS_MAX);
-    ctx->pass[KC_HPM_PASS_MAX] = '\0';
-    return KC_HPM_OK;
+int kc_p2p_set_pass(kc_p2p_t *ctx, const char *pass) {
+    if (!ctx || !pass) return KC_P2P_ERROR;
+    if (pass[0] && !kc_p2p_is_valid_pass_token(pass)) return KC_P2P_ERROR;
+    strncpy(ctx->pass, pass, KC_P2P_PASS_MAX);
+    ctx->pass[KC_P2P_PASS_MAX] = '\0';
+    return KC_P2P_OK;
 }
 
 /**
@@ -2849,10 +2849,10 @@ int kc_hpm_set_pass(kc_hpm_t *ctx, const char *pass) {
  * @param vip Whitespace-separated id/pass pairs.
  * @param err Output error buffer.
  * @param err_cap Output error buffer capacity.
- * @return KC_HPM_OK on success, KC_HPM_ERROR on parse failure.
+ * @return KC_P2P_OK on success, KC_P2P_ERROR on parse failure.
  */
-int kc_hpm_set_vip(
-kc_hpm_t *ctx,
+int kc_p2p_set_vip(
+kc_p2p_t *ctx,
 const char *vip,
 char *err,
 size_t err_cap
@@ -2861,57 +2861,57 @@ size_t err_cap
     char *copy;
     char *cursor;
 
-    if (!ctx) return KC_HPM_ERROR;
+    if (!ctx) return KC_P2P_ERROR;
     free(ctx->vips);
     ctx->vips = NULL;
     ctx->n_vips = 0;
     ctx->vips_cap = 0;
-    kc_hpm_update_nonvip_cap(ctx);
-    if (!vip || !vip[0]) return KC_HPM_OK;
+    kc_p2p_update_nonvip_cap(ctx);
+    if (!vip || !vip[0]) return KC_P2P_OK;
     copy = (char *)malloc(strlen(vip) + 1);
     if (!copy) {
         if (err && err_cap > 0)
-            snprintf(err, err_cap, "failed to allocate HPM_VIP buffer");
-        return KC_HPM_ERROR;
+            snprintf(err, err_cap, "failed to allocate P2P_VIP buffer");
+        return KC_P2P_ERROR;
     }
     strcpy(copy, vip);
-    cursor = kc_hpm_trim(copy);
+    cursor = kc_p2p_trim(copy);
     while (cursor && *cursor) {
         char *id;
         char *pass;
 
         id = cursor;
-        while (*cursor && !kc_hpm_is_space(*cursor)) cursor++;
+        while (*cursor && !kc_p2p_is_space(*cursor)) cursor++;
         if (*cursor) *cursor++ = '\0';
-        while (*cursor && kc_hpm_is_space(*cursor)) cursor++;
+        while (*cursor && kc_p2p_is_space(*cursor)) cursor++;
         if (!*cursor) {
             if (err && err_cap > 0)
-                snprintf(err, err_cap, "HPM_VIP has odd token count");
+                snprintf(err, err_cap, "P2P_VIP has odd token count");
             free(copy);
             free(ctx->vips);
             ctx->vips = NULL;
             ctx->n_vips = 0;
             ctx->vips_cap = 0;
-            kc_hpm_update_nonvip_cap(ctx);
-            return KC_HPM_ERROR;
+            kc_p2p_update_nonvip_cap(ctx);
+            return KC_P2P_ERROR;
         }
         pass = cursor;
-        while (*cursor && !kc_hpm_is_space(*cursor)) cursor++;
+        while (*cursor && !kc_p2p_is_space(*cursor)) cursor++;
         if (*cursor) *cursor++ = '\0';
-        while (*cursor && kc_hpm_is_space(*cursor)) cursor++;
-        if (kc_hpm_add_vip(ctx, id, pass, err, err_cap) != KC_HPM_OK) {
+        while (*cursor && kc_p2p_is_space(*cursor)) cursor++;
+        if (kc_p2p_add_vip(ctx, id, pass, err, err_cap) != KC_P2P_OK) {
             free(copy);
             free(ctx->vips);
             ctx->vips = NULL;
             ctx->n_vips = 0;
             ctx->vips_cap = 0;
-            kc_hpm_update_nonvip_cap(ctx);
-            return KC_HPM_ERROR;
+            kc_p2p_update_nonvip_cap(ctx);
+            return KC_P2P_ERROR;
         }
     }
     free(copy);
-    kc_hpm_update_nonvip_cap(ctx);
-    return KC_HPM_OK;
+    kc_p2p_update_nonvip_cap(ctx);
+    return KC_P2P_OK;
 }
 
 /**
@@ -2923,7 +2923,7 @@ size_t err_cap
  * Find peer.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_find_peer(kc_hpm_t *ctx, const char *id) {
+static int kc_p2p_find_peer(kc_p2p_t *ctx, const char *id) {
     int i;
     for (i = 0; i < ctx->n_peers; i++) {
         if (strcmp(ctx->peers[i].id, id) == 0)
@@ -2941,12 +2941,12 @@ static int kc_hpm_find_peer(kc_hpm_t *ctx, const char *id) {
  * Evict stale.
  * @return Status code.
  */
-static void kc_hpm_evict_stale(kc_hpm_t *ctx) {
+static void kc_p2p_evict_stale(kc_p2p_t *ctx) {
     time_t now;
     int i;
     now = time(NULL);
     for (i = ctx->n_peers - 1; i >= 0; i--) {
-        if (now - ctx->peers[i].last_seen > KC_HPM_ETIMEOUT_SEC) {
+        if (now - ctx->peers[i].last_seen > KC_P2P_ETIMEOUT_SEC) {
             if (i < ctx->n_peers - 1) {
                 memmove(&ctx->peers[i], &ctx->peers[i + 1],
                     (size_t)(ctx->n_peers - i - 1) * sizeof(ctx->peers[0]));
@@ -2965,7 +2965,7 @@ static void kc_hpm_evict_stale(kc_hpm_t *ctx) {
  * Generate key.
  * @return Status code.
  */
-static void kc_hpm_generate_key(char *out) {
+static void kc_p2p_generate_key(char *out) {
     static int seeded = 0;
     int i;
     const char hex[] = "0123456789abcdef";
@@ -2973,9 +2973,9 @@ static void kc_hpm_generate_key(char *out) {
         srand((unsigned)time(NULL));
         seeded = 1;
     }
-    for (i = 0; i < KC_HPM_KEY_SZ; i++)
+    for (i = 0; i < KC_P2P_KEY_SZ; i++)
         out[i] = hex[rand() % 16];
-    out[KC_HPM_KEY_SZ] = '\0';
+    out[KC_P2P_KEY_SZ] = '\0';
 }
 
 /**
@@ -2987,35 +2987,35 @@ static void kc_hpm_generate_key(char *out) {
  * Add peer.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_add_peer(kc_hpm_t *ctx, const char *id)
+static int kc_p2p_add_peer(kc_p2p_t *ctx, const char *id)
 {
     size_t id_len;
     int idx;
     int is_vip;
 
-    idx = kc_hpm_find_peer(ctx, id);
+    idx = kc_p2p_find_peer(ctx, id);
     if (idx >= 0) {
         ctx->peers[idx].last_seen = time(NULL);
-        kc_hpm_generate_key(ctx->peers[idx].key);
-        return KC_HPM_OK;
+        kc_p2p_generate_key(ctx->peers[idx].key);
+        return KC_P2P_OK;
     }
 
-    is_vip = kc_hpm_find_vip(ctx, id) >= 0;
-    if (!is_vip && kc_hpm_count_nonvip_peers(ctx) >= ctx->nonvip_cap)
-        return KC_HPM_EFULL;
-    if (kc_hpm_ensure_peer_storage(ctx, ctx->n_peers + 1) != KC_HPM_OK)
-        return KC_HPM_ERROR;
+    is_vip = kc_p2p_find_vip(ctx, id) >= 0;
+    if (!is_vip && kc_p2p_count_nonvip_peers(ctx) >= ctx->nonvip_cap)
+        return KC_P2P_EFULL;
+    if (kc_p2p_ensure_peer_storage(ctx, ctx->n_peers + 1) != KC_P2P_OK)
+        return KC_P2P_ERROR;
 
     id_len = strlen(id);
-    if (id_len > KC_HPM_ID_MAX)
-        id_len = KC_HPM_ID_MAX;
+    if (id_len > KC_P2P_ID_MAX)
+        id_len = KC_P2P_ID_MAX;
     memcpy(ctx->peers[ctx->n_peers].id, id, id_len);
     ctx->peers[ctx->n_peers].id[id_len] = '\0';
 
     ctx->peers[ctx->n_peers].last_seen = time(NULL);
-    kc_hpm_generate_key(ctx->peers[ctx->n_peers].key);
+    kc_p2p_generate_key(ctx->peers[ctx->n_peers].key);
     ctx->n_peers++;
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -3027,16 +3027,16 @@ static int kc_hpm_add_peer(kc_hpm_t *ctx, const char *id)
  * Remove peer.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_remove_peer(kc_hpm_t *ctx, const char *id) {
+static int kc_p2p_remove_peer(kc_p2p_t *ctx, const char *id) {
     int idx;
-    idx = kc_hpm_find_peer(ctx, id);
-    if (idx < 0) return KC_HPM_ENOENT;
+    idx = kc_p2p_find_peer(ctx, id);
+    if (idx < 0) return KC_P2P_ENOENT;
     if (idx < ctx->n_peers - 1) {
         memmove(&ctx->peers[idx], &ctx->peers[idx + 1],
             (size_t)(ctx->n_peers - idx - 1) * sizeof(ctx->peers[0]));
     }
     ctx->n_peers--;
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -3047,14 +3047,14 @@ static int kc_hpm_remove_peer(kc_hpm_t *ctx, const char *id) {
  * @param port Peer port.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_refresh_peer(kc_hpm_t *ctx, const char *id)
+static int kc_p2p_refresh_peer(kc_p2p_t *ctx, const char *id)
 {
     int idx;
 
-    idx = kc_hpm_find_peer(ctx, id);
-    if (idx < 0) return KC_HPM_ENOENT;
+    idx = kc_p2p_find_peer(ctx, id);
+    if (idx < 0) return KC_P2P_ENOENT;
     ctx->peers[idx].last_seen = time(NULL);
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -3063,7 +3063,7 @@ static int kc_hpm_refresh_peer(kc_hpm_t *ctx, const char *id)
  * @param peer_sa Remote peer address.
  * @return Challenge index on success, -1 on failure.
  */
-static int kc_hpm_find_pow_challenge(kc_hpm_t *ctx,
+static int kc_p2p_find_pow_challenge(kc_p2p_t *ctx,
     const struct sockaddr_in *peer_sa)
 {
     int i;
@@ -3081,7 +3081,7 @@ static int kc_hpm_find_pow_challenge(kc_hpm_t *ctx,
  * @param idx Challenge index.
  * @return None.
  */
-static void kc_hpm_remove_pow_challenge(kc_hpm_t *ctx, int idx) {
+static void kc_p2p_remove_pow_challenge(kc_p2p_t *ctx, int idx) {
     if (!ctx || idx < 0 || idx >= ctx->n_pow_challenges) return;
     if (idx < ctx->n_pow_challenges - 1)
         ctx->pow_challenges[idx] = ctx->pow_challenges[ctx->n_pow_challenges - 1];
@@ -3096,16 +3096,16 @@ static void kc_hpm_remove_pow_challenge(kc_hpm_t *ctx, int idx) {
  * @param nonce_hex Challenge nonce in hex.
  * @return 1 on success, 0 on failure.
  */
-static int kc_hpm_store_pow_challenge(kc_hpm_t *ctx,
+static int kc_p2p_store_pow_challenge(kc_p2p_t *ctx,
     const struct sockaddr_in *peer_sa, const char *id, const char *nonce_hex)
 {
     int idx;
     size_t id_len;
     size_t nonce_len;
 
-    idx = kc_hpm_find_pow_challenge(ctx, peer_sa);
+    idx = kc_p2p_find_pow_challenge(ctx, peer_sa);
     if (idx < 0) {
-        if (ctx->n_pow_challenges >= KC_HPM_POW_CHALLENGES_MAX) return 0;
+        if (ctx->n_pow_challenges >= KC_P2P_POW_CHALLENGES_MAX) return 0;
         idx = ctx->n_pow_challenges++;
     }
     nonce_len = strlen(nonce_hex);
@@ -3119,7 +3119,7 @@ static int kc_hpm_store_pow_challenge(kc_hpm_t *ctx,
         id_len = sizeof(ctx->pow_challenges[idx].id) - 1;
     memcpy(ctx->pow_challenges[idx].id, id, id_len);
     ctx->pow_challenges[idx].id[id_len] = '\0';
-    ctx->pow_challenges[idx].id[KC_HPM_ID_MAX] = '\0';
+    ctx->pow_challenges[idx].id[KC_P2P_ID_MAX] = '\0';
     memcpy(&ctx->pow_challenges[idx].addr, peer_sa, sizeof(*peer_sa));
     ctx->pow_challenges[idx].issued_at = time(NULL);
     return 1;
@@ -3133,12 +3133,12 @@ static int kc_hpm_store_pow_challenge(kc_hpm_t *ctx,
  * @param reply_sz Output reply capacity.
  * @return 1 on success, 0 on failure.
  */
-static int kc_hpm_format_register_ok(kc_hpm_t *ctx, const char *id,
+static int kc_p2p_format_register_ok(kc_p2p_t *ctx, const char *id,
     char *reply, size_t reply_sz)
 {
     int pidx;
 
-    pidx = kc_hpm_find_peer(ctx, id);
+    pidx = kc_p2p_find_peer(ctx, id);
     if (pidx < 0) return 0;
     snprintf(reply, reply_sz, "OK:KEY:%s", ctx->peers[pidx].key);
     return 1;
@@ -3153,12 +3153,12 @@ static int kc_hpm_format_register_ok(kc_hpm_t *ctx, const char *id,
  * Conn add.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_conn_add(kc_hpm_t *ctx, int fd) {
+static int kc_p2p_conn_add(kc_p2p_t *ctx, int fd) {
     if (ctx->n_conns >= ctx->conns_cap) {
         int new_cap = ctx->conns_cap == 0 ? 64 : ctx->conns_cap * 2;
-        kc_hpm_tcp_conn_t *c = (kc_hpm_tcp_conn_t *)realloc(
-            ctx->conns, (size_t)new_cap * sizeof(kc_hpm_tcp_conn_t));
-        if (!c) return KC_HPM_ERROR;
+        kc_p2p_tcp_conn_t *c = (kc_p2p_tcp_conn_t *)realloc(
+            ctx->conns, (size_t)new_cap * sizeof(kc_p2p_tcp_conn_t));
+        if (!c) return KC_P2P_ERROR;
         ctx->conns = c;
         ctx->conns_cap = new_cap;
     }
@@ -3167,7 +3167,7 @@ static int kc_hpm_conn_add(kc_hpm_t *ctx, int fd) {
     ctx->conns[ctx->n_conns].id[0] = '\0';
     ctx->conns[ctx->n_conns].registered = 0;
     ctx->n_conns++;
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -3179,10 +3179,10 @@ static int kc_hpm_conn_add(kc_hpm_t *ctx, int fd) {
  * Conn remove.
  * @return Status code.
  */
-static void kc_hpm_conn_remove(kc_hpm_t *ctx, int idx) {
+static void kc_p2p_conn_remove(kc_p2p_t *ctx, int idx) {
     if (idx < 0 || idx >= ctx->n_conns) return;
-    kc_hpm_fd_t fd = ctx->conns[idx].fd;
-    KC_HPM_FD_CLOSE(fd);
+    kc_p2p_fd_t fd = ctx->conns[idx].fd;
+    KC_P2P_FD_CLOSE(fd);
     for (int pi = 0; pi < ctx->n_pending_punches; pi++) {
         if (ctx->pending_punches[pi].consumer_fd == fd) {
             ctx->pending_punches[pi] = ctx->pending_punches[--ctx->n_pending_punches];
@@ -3200,7 +3200,7 @@ static void kc_hpm_conn_remove(kc_hpm_t *ctx, int idx) {
  * Pending punch find.
  * @return index on success, -1 on error.
  */
-static int kc_hpm_pending_punch_find(kc_hpm_t *ctx, const char *target_id, const char *self_id, const char *sess_id) {
+static int kc_p2p_pending_punch_find(kc_p2p_t *ctx, const char *target_id, const char *self_id, const char *sess_id) {
     for (int i = 0; i < ctx->n_pending_punches; i++) {
         if (strcmp(ctx->pending_punches[i].target_id, target_id) == 0 &&
             strcmp(ctx->pending_punches[i].self_id, self_id) == 0 &&
@@ -3214,7 +3214,7 @@ static int kc_hpm_pending_punch_find(kc_hpm_t *ctx, const char *target_id, const
  * Pending punch remove.
  * @return None.
  */
-static void kc_hpm_pending_punch_remove(kc_hpm_t *ctx, int idx) {
+static void kc_p2p_pending_punch_remove(kc_p2p_t *ctx, int idx) {
     if (idx >= 0 && idx < ctx->n_pending_punches)
         ctx->pending_punches[idx] = ctx->pending_punches[--ctx->n_pending_punches];
 }
@@ -3223,7 +3223,7 @@ static void kc_hpm_pending_punch_remove(kc_hpm_t *ctx, int idx) {
  * Pending punch evict stale.
  * @return None.
  */
-static void kc_hpm_pending_punch_evict_stale(kc_hpm_t *ctx) {
+static void kc_p2p_pending_punch_evict_stale(kc_p2p_t *ctx) {
     time_t now = time(NULL);
     for (int i = 0; i < ctx->n_pending_punches; i++) {
         if (now - ctx->pending_punches[i].ts > 30) {
@@ -3251,22 +3251,22 @@ static void kc_hpm_pending_punch_evict_stale(kc_hpm_t *ctx) {
  * @param out_count Output count.
  * @return None.
  */
-static void kc_hpm_parse_remote_candidates(const char *buf, kc_hpm_candidate_t *out, int *out_count) {
+static void kc_p2p_parse_remote_candidates(const char *buf, kc_p2p_candidate_t *out, int *out_count) {
     (void)buf;
     *out_count = 0;
     const char *p = buf;
     while (p && *p) {
         char *nl = strchr(p, '\n');
         if (nl) *nl = '\0';
-        if (strncmp(p, "CAND:", 5) == 0 && *out_count < KC_HPM_CANDIDATES_MAX) {
+        if (strncmp(p, "CAND:", 5) == 0 && *out_count < KC_P2P_CANDIDATES_MAX) {
             char ctype[16];
-            kc_hpm_candidate_t *c = &out[*out_count];
+            kc_p2p_candidate_t *c = &out[*out_count];
             if (sscanf(p, "CAND:%15[^:]:%47[^:]:%hu", ctype, c->addr, &c->port) == 3) {
-                if (strcmp(ctype, "host") == 0) c->type = KC_HPM_CAND_HOST;
-                else if (strcmp(ctype, "lan") == 0) c->type = KC_HPM_CAND_LAN;
-                else if (strcmp(ctype, "public") == 0) c->type = KC_HPM_CAND_PUBLIC;
-                else if (strcmp(ctype, "srflx") == 0) c->type = KC_HPM_CAND_SRFLX;
-                else c->type = KC_HPM_CAND_HOST;
+                if (strcmp(ctype, "host") == 0) c->type = KC_P2P_CAND_HOST;
+                else if (strcmp(ctype, "lan") == 0) c->type = KC_P2P_CAND_LAN;
+                else if (strcmp(ctype, "public") == 0) c->type = KC_P2P_CAND_PUBLIC;
+                else if (strcmp(ctype, "srflx") == 0) c->type = KC_P2P_CAND_SRFLX;
+                else c->type = KC_P2P_CAND_HOST;
                 (*out_count)++;
             }
         }
@@ -3274,13 +3274,13 @@ static void kc_hpm_parse_remote_candidates(const char *buf, kc_hpm_candidate_t *
     }
 }
 
-#define KC_HPM_STUN_ATTR_DATA 0x0013
+#define KC_P2P_STUN_ATTR_DATA 0x0013
 
 /**
  * STUN put16.
  * @return None.
  */
-static void kc_hpm_stun_put16(unsigned char *b, int o, int v) {
+static void kc_p2p_stun_put16(unsigned char *b, int o, int v) {
     b[o] = (unsigned char)(v >> 8); b[o + 1] = (unsigned char)(v);
 }
 
@@ -3288,18 +3288,18 @@ static void kc_hpm_stun_put16(unsigned char *b, int o, int v) {
  * STUN length.
  * @return None.
  */
-static void kc_hpm_stun_len(unsigned char *buf, int o) {
-    kc_hpm_stun_put16(buf, 2, o - 20);
+static void kc_p2p_stun_len(unsigned char *buf, int o) {
+    kc_p2p_stun_put16(buf, 2, o - 20);
 }
 
 /**
  * STUN gen id.
  * @return None.
  */
-static void kc_hpm_stun_gen_id(unsigned char id[12]) {
-    static int kc_hpm_stun_seeded = 0;
+static void kc_p2p_stun_gen_id(unsigned char id[12]) {
+    static int kc_p2p_stun_seeded = 0;
     int i;
-    if (!kc_hpm_stun_seeded) { srand((unsigned)time(NULL)); kc_hpm_stun_seeded = 1; }
+    if (!kc_p2p_stun_seeded) { srand((unsigned)time(NULL)); kc_p2p_stun_seeded = 1; }
     for (i = 0; i < 12; i++) id[i] = (unsigned char)(rand() & 0xff);
 }
 
@@ -3307,10 +3307,10 @@ static void kc_hpm_stun_gen_id(unsigned char id[12]) {
  * STUN build.
  * @return offset after header.
  */
-static int kc_hpm_stun_build(unsigned char *buf, int mt, const unsigned char id[12]) {
+static int kc_p2p_stun_build(unsigned char *buf, int mt, const unsigned char id[12]) {
     memset(buf, 0, 20);
-    kc_hpm_stun_put16(buf, 0, mt);
-    kc_hpm_stun_put16(buf, 4, 0x2112); buf[6] = 0xA4; buf[7] = 0x42;
+    kc_p2p_stun_put16(buf, 0, mt);
+    kc_p2p_stun_put16(buf, 4, 0x2112); buf[6] = 0xA4; buf[7] = 0x42;
     memcpy(buf + 8, id, 12);
     return 20;
 }
@@ -3319,11 +3319,11 @@ static int kc_hpm_stun_build(unsigned char *buf, int mt, const unsigned char id[
  * STUN hdr.
  * @return message type, or -1 on error.
  */
-static int kc_hpm_stun_hdr(const unsigned char *buf, int len, unsigned char id[12]) {
+static int kc_p2p_stun_hdr(const unsigned char *buf, int len, unsigned char id[12]) {
     if (len < 20) return -1;
     uint32_t mg = ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) |
         ((uint32_t)buf[6] << 8) | buf[7];
-    if (mg != KC_HPM_STUN_MAGIC) return -1;
+    if (mg != KC_P2P_STUN_MAGIC) return -1;
     int mt = (buf[0] << 8) | buf[1];
     memcpy(id, buf + 8, 12);
     return mt;
@@ -3333,7 +3333,7 @@ static int kc_hpm_stun_hdr(const unsigned char *buf, int len, unsigned char id[1
  * STUN find attr.
  * @return offset of attr, or -1.
  */
-static int kc_hpm_stun_find(const unsigned char *buf, int len, int t, int *al) {
+static int kc_p2p_stun_find(const unsigned char *buf, int len, int t, int *al) {
     int o = 20;
     while (o + 4 <= len) {
         int at = (buf[o] << 8) | buf[o + 1];
@@ -3349,7 +3349,7 @@ static int kc_hpm_stun_find(const unsigned char *buf, int len, int t, int *al) {
  * STUN rd xaddr.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_stun_rd_xaddr(const unsigned char *buf, int o, int al,
+static int kc_p2p_stun_rd_xaddr(const unsigned char *buf, int o, int al,
     unsigned char id[12], char *addr, int acap, unsigned short *port)
 {
     (void)id;
@@ -3358,8 +3358,8 @@ static int kc_hpm_stun_rd_xaddr(const unsigned char *buf, int o, int al,
     unsigned short xp = ((unsigned short)buf[o + 2] << 8) | buf[o + 3];
     uint32_t xa = ((uint32_t)buf[o + 4] << 24) | ((uint32_t)buf[o + 5] << 16) |
         ((uint32_t)buf[o + 6] << 8) | buf[o + 7];
-    *port = xp ^ (unsigned short)(KC_HPM_STUN_MAGIC >> 16);
-    uint32_t a = xa ^ KC_HPM_STUN_MAGIC;
+    *port = xp ^ (unsigned short)(KC_P2P_STUN_MAGIC >> 16);
+    uint32_t a = xa ^ KC_P2P_STUN_MAGIC;
     snprintf(addr, (size_t)acap, "%u.%u.%u.%u",
         (unsigned)(a >> 24) & 0xff, (unsigned)(a >> 16) & 0xff,
         (unsigned)(a >> 8) & 0xff, (unsigned)(a & 0xff));
@@ -3369,14 +3369,14 @@ static int kc_hpm_stun_rd_xaddr(const unsigned char *buf, int o, int al,
 /**
  * STUN binding.
  * Summary: Sends Binding Request and returns srflx ip:port for udp_fd.
- * @param ctx      HPM context.
+ * @param ctx      P2P context.
  * @param udp_fd   Bound UDP socket.
  * @param out_ip   Output address buffer.
  * @param out_cap  Output address buffer size.
  * @param out_port Output port.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_stun_binding(kc_hpm_t *ctx, int udp_fd,
+static int kc_p2p_stun_binding(kc_p2p_t *ctx, int udp_fd,
     char *out_ip, int out_cap, unsigned short *out_port)
 {
     unsigned char tx[4096], rx[4096], id[12];
@@ -3406,11 +3406,11 @@ static int kc_hpm_stun_binding(kc_hpm_t *ctx, int udp_fd,
         port = (unsigned short)atoi(co + 1);
     }
 
-    if (kc_hpm_resolve(host, port, SOCK_DGRAM, &srv) != 0) return -1;
+    if (kc_p2p_resolve(host, port, SOCK_DGRAM, &srv) != 0) return -1;
 
-    kc_hpm_stun_gen_id(id);
-    off = kc_hpm_stun_build(tx, KC_HPM_STUN_BINDING, id);
-    kc_hpm_stun_len(tx, off);
+    kc_p2p_stun_gen_id(id);
+    off = kc_p2p_stun_build(tx, KC_P2P_STUN_BINDING, id);
+    kc_p2p_stun_len(tx, off);
 
     if (sendto(udp_fd, (const char *)tx, (size_t)off, 0,
         (const struct sockaddr *)&srv, sizeof(srv)) < 0) return -1;
@@ -3422,12 +3422,12 @@ static int kc_hpm_stun_binding(kc_hpm_t *ctx, int udp_fd,
     rl = (int)recvfrom(udp_fd, (char *)rx, sizeof(rx), 0, NULL, NULL);
     if (rl < 20) return -1;
 
-    mt = kc_hpm_stun_hdr(rx, rl, id);
-    if (mt != KC_HPM_STUN_BINDING_RESP) return -1;
+    mt = kc_p2p_stun_hdr(rx, rl, id);
+    if (mt != KC_P2P_STUN_BINDING_RESP) return -1;
 
-    ao = kc_hpm_stun_find(rx, rl, KC_HPM_STUN_ATTR_XOR_MAPPED_ADDR, &al);
+    ao = kc_p2p_stun_find(rx, rl, KC_P2P_STUN_ATTR_XOR_MAPPED_ADDR, &al);
     if (ao < 0) return -1;
-    if (kc_hpm_stun_rd_xaddr(rx, ao, al, id, out_ip, out_cap, out_port) != 0)
+    if (kc_p2p_stun_rd_xaddr(rx, ao, al, id, out_ip, out_cap, out_port) != 0)
         return -1;
     return 0;
 }
@@ -3436,15 +3436,15 @@ static int kc_hpm_stun_binding(kc_hpm_t *ctx, int udp_fd,
  * Set stun url.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_set_stun_url(kc_hpm_t *ctx, const char *url) {
-    if (!ctx) return KC_HPM_ERROR;
+int kc_p2p_set_stun_url(kc_p2p_t *ctx, const char *url) {
+    if (!ctx) return KC_P2P_ERROR;
     if (url) {
         strncpy(ctx->stun_url, url, sizeof(ctx->stun_url) - 1);
         ctx->stun_url[sizeof(ctx->stun_url) - 1] = '\0';
     } else {
         ctx->stun_url[0] = '\0';
     }
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -3458,10 +3458,10 @@ int kc_hpm_set_stun_url(kc_hpm_t *ctx, const char *url) {
  * @param out_count  Output count.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_gather_candidates(kc_hpm_t *ctx, int udp_fd,
-    kc_hpm_candidate_t *out, int out_cap, int *out_count) {
+int kc_p2p_gather_candidates(kc_p2p_t *ctx, int udp_fd,
+    kc_p2p_candidate_t *out, int out_cap, int *out_count) {
     struct sockaddr_in udp_sa;
-    char stun_ip[KC_HPM_ADDR_MAX + 1];
+    char stun_ip[KC_P2P_ADDR_MAX + 1];
     unsigned short stun_port;
     socklen_t udp_sa_len = sizeof(udp_sa);
 
@@ -3471,14 +3471,14 @@ int kc_hpm_gather_candidates(kc_hpm_t *ctx, int udp_fd,
     if (getsockname(udp_fd, (struct sockaddr *)&udp_sa, &udp_sa_len) == 0) {
         unsigned short udp_port = ntohs(udp_sa.sin_port);
         if (*out_count < out_cap) {
-            out[*out_count].type = KC_HPM_CAND_HOST;
+            out[*out_count].type = KC_P2P_CAND_HOST;
             strcpy(out[*out_count].addr, "127.0.0.1");
             out[*out_count].port = udp_port;
             (*out_count)++;
         }
         
-        kc_hpm_fd_t test_fd = socket(AF_INET, SOCK_DGRAM, 0);
-        if (!KC_HPM_ISERR(test_fd)) {
+        kc_p2p_fd_t test_fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (!KC_P2P_ISERR(test_fd)) {
             struct sockaddr_in target;
             memset(&target, 0, sizeof(target));
             target.sin_family = AF_INET;
@@ -3493,30 +3493,30 @@ int kc_hpm_gather_candidates(kc_hpm_t *ctx, int udp_fd,
                     inet_ntop(AF_INET, &local_sa.sin_addr, local_ip, sizeof(local_ip));
                     
                     if (strcmp(local_ip, "127.0.0.1") != 0 && strcmp(local_ip, "0.0.0.0") != 0 && *out_count < out_cap) {
-                        out[*out_count].type = KC_HPM_CAND_LAN;
+                        out[*out_count].type = KC_P2P_CAND_LAN;
                         strcpy(out[*out_count].addr, local_ip);
                         out[*out_count].port = udp_port;
                         (*out_count)++;
                     }
                 }
             }
-            KC_HPM_FD_CLOSE(test_fd);
+            KC_P2P_FD_CLOSE(test_fd);
         }
 
         if (ctx && ctx->stun_url[0]) {
-            kc_hpm_stun_binding(ctx, udp_fd, stun_ip, (int)sizeof(stun_ip),
+            kc_p2p_stun_binding(ctx, udp_fd, stun_ip, (int)sizeof(stun_ip),
                 &stun_port);
         }
         if (stun_ip[0] != '\0' && *out_count < out_cap) {
             unsigned short srflx_port = stun_port ? stun_port : udp_port;
-            out[*out_count].type = KC_HPM_CAND_SRFLX;
+            out[*out_count].type = KC_P2P_CAND_SRFLX;
             snprintf(out[*out_count].addr, sizeof(out[*out_count].addr),
                 "%.47s", stun_ip);
             out[*out_count].port = srflx_port;
             (*out_count)++;
         }
     }
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -3532,9 +3532,9 @@ int kc_hpm_gather_candidates(kc_hpm_t *ctx, int udp_fd,
  * @param selected_addr          Selected output address.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_punch_select(kc_hpm_t *ctx, int sweep_limit, int udp_fd, const char *session_id, const char *from_id, const char *to_id, const kc_hpm_candidate_t *remote_candidates, int remote_candidate_count, struct sockaddr_in *selected_addr) {
+int kc_p2p_punch_select(kc_p2p_t *ctx, int sweep_limit, int udp_fd, const char *session_id, const char *from_id, const char *to_id, const kc_p2p_candidate_t *remote_candidates, int remote_candidate_count, struct sockaddr_in *selected_addr) {
     (void)ctx;
-    if (remote_candidate_count <= 0) return KC_HPM_ERROR;
+    if (remote_candidate_count <= 0) return KC_P2P_ERROR;
     
     char ping_msg[256];
     snprintf(ping_msg, sizeof(ping_msg), "PUNCH_PING:%s:%s:%s\n", session_id, from_id, to_id);
@@ -3564,8 +3564,8 @@ int kc_hpm_punch_select(kc_hpm_t *ctx, int sweep_limit, int udp_fd, const char *
                 int n = recvfrom(udp_fd, recv_buf, sizeof(recv_buf) - 1, 0, (struct sockaddr *)&src_addr, &src_len);
                 if (n > 0) {
                     char rx_sess[64] = {0};
-                    char rx_from[KC_HPM_ID_MAX + 1] = {0};
-                    char rx_to[KC_HPM_ID_MAX + 1] = {0};
+                    char rx_from[KC_P2P_ID_MAX + 1] = {0};
+                    char rx_to[KC_P2P_ID_MAX + 1] = {0};
                     int is_ping = 0;
                     int is_pong = 0;
 
@@ -3589,7 +3589,7 @@ int kc_hpm_punch_select(kc_hpm_t *ctx, int sweep_limit, int udp_fd, const char *
                             snprintf(pong_msg, sizeof(pong_msg), "PUNCH_PONG:%s:%s:%s\n", session_id, to_id, from_id);
                             sendto(udp_fd, pong_msg, strlen(pong_msg), 0, (struct sockaddr *)&src_addr, sizeof(src_addr));
                         }
-                        return KC_HPM_OK;
+                        return KC_P2P_OK;
                     }
                 }
             }
@@ -3607,7 +3607,7 @@ int kc_hpm_punch_select(kc_hpm_t *ctx, int sweep_limit, int udp_fd, const char *
                 exact_sa.sin_port = htons(remote_candidates[c].port);
                 sendto(udp_fd, ping_msg, strlen(ping_msg), 0, (struct sockaddr *)&exact_sa, sizeof(exact_sa));
                 
-                if (remote_candidates[c].type == KC_HPM_CAND_SRFLX || remote_candidates[c].type == KC_HPM_CAND_PUBLIC) {
+                if (remote_candidates[c].type == KC_P2P_CAND_SRFLX || remote_candidates[c].type == KC_P2P_CAND_PUBLIC) {
                     struct sockaddr_in cand_sa;
                     memset(&cand_sa, 0, sizeof(cand_sa));
                     cand_sa.sin_family = AF_INET;
@@ -3635,8 +3635,8 @@ int kc_hpm_punch_select(kc_hpm_t *ctx, int sweep_limit, int udp_fd, const char *
                     int n = recvfrom(udp_fd, recv_buf, sizeof(recv_buf) - 1, 0, (struct sockaddr *)&src_addr, &src_len);
                     if (n > 0) {
                         char rx_sess[64] = {0};
-                        char rx_from[KC_HPM_ID_MAX + 1] = {0};
-                        char rx_to[KC_HPM_ID_MAX + 1] = {0};
+                        char rx_from[KC_P2P_ID_MAX + 1] = {0};
+                        char rx_to[KC_P2P_ID_MAX + 1] = {0};
                         int is_ping = 0;
                         int is_pong = 0;
 
@@ -3660,14 +3660,14 @@ int kc_hpm_punch_select(kc_hpm_t *ctx, int sweep_limit, int udp_fd, const char *
                                 snprintf(pong_msg, sizeof(pong_msg), "PUNCH_PONG:%s:%s:%s\n", session_id, to_id, from_id);
                                 sendto(udp_fd, pong_msg, strlen(pong_msg), 0, (struct sockaddr *)&src_addr, sizeof(src_addr));
                             }
-                            return KC_HPM_OK;
+                            return KC_P2P_OK;
                         }
                     }
                 }
             }
         }
     }
-    return KC_HPM_ERROR;
+    return KC_P2P_ERROR;
 }
 
 /**
@@ -3678,12 +3678,12 @@ int kc_hpm_punch_select(kc_hpm_t *ctx, int sweep_limit, int udp_fd, const char *
  * @param port Port.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_serve_index(
-    kc_hpm_t *ctx,
+int kc_p2p_serve_index(
+    kc_p2p_t *ctx,
     const char *host,
     unsigned short port)
 {
-    kc_hpm_fd_t tcp_fd;
+    kc_p2p_fd_t tcp_fd;
     struct addrinfo hints;
     struct addrinfo *ai;
     char port_str[16];
@@ -3692,8 +3692,8 @@ int kc_hpm_serve_index(
     int ret, i, n;
     int maxfd;
 
-    if (kc_hpm_platform_init() != 0)
-        return KC_HPM_ENET;
+    if (kc_p2p_platform_init() != 0)
+        return KC_P2P_ENET;
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
@@ -3701,62 +3701,62 @@ int kc_hpm_serve_index(
     hints.ai_flags = AI_PASSIVE;
     snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
     ret = getaddrinfo(host, port_str, &hints, &ai);
-    if (ret != 0) { kc_hpm_platform_cleanup(); return KC_HPM_ENET; }
+    if (ret != 0) { kc_p2p_platform_cleanup(); return KC_P2P_ENET; }
     tcp_fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-    if (KC_HPM_ISERR(tcp_fd)) { freeaddrinfo(ai); kc_hpm_platform_cleanup(); return KC_HPM_ENET; }
+    if (KC_P2P_ISERR(tcp_fd)) { freeaddrinfo(ai); kc_p2p_platform_cleanup(); return KC_P2P_ENET; }
     { int reuse = 1; setsockopt(tcp_fd, SOL_SOCKET, SO_REUSEADDR, (void *)&reuse, sizeof(reuse)); }
     if (bind(tcp_fd, ai->ai_addr, (socklen_t)ai->ai_addrlen) == SOCKET_ERROR)
-        { KC_HPM_FD_CLOSE(tcp_fd); freeaddrinfo(ai); kc_hpm_platform_cleanup(); return KC_HPM_ENET; }
+        { KC_P2P_FD_CLOSE(tcp_fd); freeaddrinfo(ai); kc_p2p_platform_cleanup(); return KC_P2P_ENET; }
     if (listen(tcp_fd, 32) == SOCKET_ERROR)
-        { KC_HPM_FD_CLOSE(tcp_fd); freeaddrinfo(ai); kc_hpm_platform_cleanup(); return KC_HPM_ENET; }
+        { KC_P2P_FD_CLOSE(tcp_fd); freeaddrinfo(ai); kc_p2p_platform_cleanup(); return KC_P2P_ENET; }
     freeaddrinfo(ai);
 
-    kc_hpm_set_nonblock(tcp_fd);
+    kc_p2p_set_nonblock(tcp_fd);
 
-    fprintf(stderr, "hpm: index server listening on %s:%u\n",
+    fprintf(stderr, "p2p: index server listening on %s:%u\n",
         host ? host : "0.0.0.0", (unsigned)port);
 
     while (1) {
-        if (kc_hpm_stop_requested) { fprintf(stderr, "hpm: shutdown requested\n"); break; }
+        if (kc_p2p_stop_requested) { fprintf(stderr, "p2p: shutdown requested\n"); break; }
 
         FD_ZERO(&fds);
         FD_SET(tcp_fd, &fds);
         maxfd = (int)tcp_fd;
 
-        kc_hpm_lock(ctx);
+        kc_p2p_lock(ctx);
         for (i = 0; i < ctx->n_conns; i++) {
             FD_SET(ctx->conns[i].fd, &fds);
             if ((int)ctx->conns[i].fd > maxfd) maxfd = (int)ctx->conns[i].fd;
         }
-        kc_hpm_unlock(ctx);
+        kc_p2p_unlock(ctx);
 
         tv.tv_sec = 1; tv.tv_usec = 0;
         n = select(maxfd + 1, &fds, NULL, NULL, &tv);
-        if (n < 0) { if (kc_hpm_stop_requested) break; continue; }
+        if (n < 0) { if (kc_p2p_stop_requested) break; continue; }
         if (n == 0) continue;
 
         if (FD_ISSET(tcp_fd, &fds)) {
             struct sockaddr_in client_addr;
             socklen_t client_len = sizeof(client_addr);
-            kc_hpm_fd_t client_fd = accept(tcp_fd, (struct sockaddr *)&client_addr, &client_len);
-            if (!KC_HPM_ISERR(client_fd)) {
-                kc_hpm_set_nonblock(client_fd);
-                kc_hpm_lock(ctx);
-                kc_hpm_conn_add(ctx, client_fd);
-                kc_hpm_unlock(ctx);
+            kc_p2p_fd_t client_fd = accept(tcp_fd, (struct sockaddr *)&client_addr, &client_len);
+            if (!KC_P2P_ISERR(client_fd)) {
+                kc_p2p_set_nonblock(client_fd);
+                kc_p2p_lock(ctx);
+                kc_p2p_conn_add(ctx, client_fd);
+                kc_p2p_unlock(ctx);
             }
         }
 
-        kc_hpm_lock(ctx);
+        kc_p2p_lock(ctx);
         for (i = ctx->n_conns - 1; i >= 0; i--) {
             if (!FD_ISSET(ctx->conns[i].fd, &fds)) continue;
 
             {
-                kc_hpm_tcp_conn_t *c = &ctx->conns[i];
-                char tmp[KC_HPM_BUF];
+                kc_p2p_tcp_conn_t *c = &ctx->conns[i];
+                char tmp[KC_P2P_BUF];
                 int nr;
 
-                nr = kc_hpm_sock_read(c->fd, tmp, (int)sizeof(tmp) - 1);
+                nr = kc_p2p_sock_read(c->fd, tmp, (int)sizeof(tmp) - 1);
                 if (nr <= 0) {
                     int cidx;
                     struct sockaddr_in dead_peer_sa;
@@ -3767,17 +3767,17 @@ int kc_hpm_serve_index(
                     if (getpeername(c->fd, (struct sockaddr *)&dead_peer_sa,
                         &dead_peer_len) == 0)
                     {
-                        cidx = kc_hpm_find_pow_challenge(ctx, &dead_peer_sa);
+                        cidx = kc_p2p_find_pow_challenge(ctx, &dead_peer_sa);
                     } else {
                         cidx = -1;
                     }
                     if (cidx >= 0)
-                        kc_hpm_remove_pow_challenge(ctx, cidx);
+                        kc_p2p_remove_pow_challenge(ctx, cidx);
                     if (c->registered) {
-                        kc_hpm_remove_peer(ctx, c->id);
-                        fprintf(stderr, "hpm: peer '%s' disconnected\n", c->id);
+                        kc_p2p_remove_peer(ctx, c->id);
+                        fprintf(stderr, "p2p: peer '%s' disconnected\n", c->id);
                     }
-                    kc_hpm_conn_remove(ctx, i);
+                    kc_p2p_conn_remove(ctx, i);
                     continue;
                 }
 
@@ -3800,10 +3800,10 @@ int kc_hpm_serve_index(
                         (size_t)(c->buf + c->buf_len - line_start))) != NULL)
                     {
                         int line_len = (int)(newline - line_start);
-                        char cmd_buf[KC_HPM_BUF];
+                        char cmd_buf[KC_P2P_BUF];
                         char cmd[32];
-                        char id[KC_HPM_ID_MAX + 1];
-                        char reply_buf[KC_HPM_BUF];
+                        char id[KC_P2P_ID_MAX + 1];
+                        char reply_buf[KC_P2P_BUF];
                         int srv_idx;
 
                         if (line_len > (int)sizeof(cmd_buf) - 1)
@@ -3831,12 +3831,12 @@ int kc_hpm_serve_index(
                                 rend = sol;
                                 if (!rend) rend = rstart + strlen(rstart);
                                 rlen = rend - rstart;
-                                if (rlen > KC_HPM_ID_MAX) rlen = KC_HPM_ID_MAX;
+                                if (rlen > KC_P2P_ID_MAX) rlen = KC_P2P_ID_MAX;
                                 memcpy(id, rstart, rlen);
                                 id[rlen] = '\0';
                             }
-                            if (!kc_hpm_is_valid_id(id)) {
-                                kc_hpm_tcp_send(c->fd, "ERROR:invalid id");
+                            if (!kc_p2p_is_valid_id(id)) {
+                                kc_p2p_tcp_send(c->fd, "ERROR:invalid id");
                                 continue;
                             }
 
@@ -3850,47 +3850,47 @@ int kc_hpm_serve_index(
                                     "REGISTER:%63[^:]:SOLUTION:%16[^:]:PROOF:%64[^\n]",
                                     id, solution, proof) == 3)
                                 {
-                                    register_pass = kc_hpm_get_register_pass(ctx, id);
-                                    cidx = kc_hpm_find_pow_challenge(ctx, &peer_sa);
+                                    register_pass = kc_p2p_get_register_pass(ctx, id);
+                                    cidx = kc_p2p_find_pow_challenge(ctx, &peer_sa);
                                     if (cidx < 0 ||
                                         strcmp(ctx->pow_challenges[cidx].id, id) != 0 ||
-                                        !kc_hpm_verify_register_pow(register_pass,
+                                        !kc_p2p_verify_register_pow(register_pass,
                                             ctx->pow_challenges[cidx].nonce_hex, id,
                                             solution, proof, ctx->pow_bits))
                                     {
                                         if (cidx >= 0)
-                                            kc_hpm_remove_pow_challenge(ctx, cidx);
-                                        kc_hpm_tcp_send(c->fd, "AUTH_FAILED");
+                                            kc_p2p_remove_pow_challenge(ctx, cidx);
+                                        kc_p2p_tcp_send(c->fd, "AUTH_FAILED");
                                         continue;
                                     }
-                                    kc_hpm_remove_pow_challenge(ctx, cidx);
-                                    if (kc_hpm_add_peer(ctx, id) == KC_HPM_OK &&
-                                        kc_hpm_format_register_ok(ctx, id,
+                                    kc_p2p_remove_pow_challenge(ctx, cidx);
+                                    if (kc_p2p_add_peer(ctx, id) == KC_P2P_OK &&
+                                        kc_p2p_format_register_ok(ctx, id,
                                             reply_buf, sizeof(reply_buf)))
                                     {
-                                        kc_hpm_tcp_send(c->fd, reply_buf);
+                                        kc_p2p_tcp_send(c->fd, reply_buf);
                                         strcpy(c->id, id);
                                         c->registered = 1;
                                     } else {
-                                        kc_hpm_tcp_send(c->fd, "ERROR:peer table full");
+                                        kc_p2p_tcp_send(c->fd, "ERROR:peer table full");
                                     }
                                 } else {
-                                    kc_hpm_tcp_send(c->fd, "AUTH_FAILED");
+                                    kc_p2p_tcp_send(c->fd, "AUTH_FAILED");
                                     continue;
                                 }
                             } else if (c->registered && strcmp(c->id, id) == 0) {
-                                if (kc_hpm_refresh_peer(ctx, id) == KC_HPM_OK &&
-                                    kc_hpm_format_register_ok(ctx, id,
+                                if (kc_p2p_refresh_peer(ctx, id) == KC_P2P_OK &&
+                                    kc_p2p_format_register_ok(ctx, id,
                                         reply_buf, sizeof(reply_buf)))
                                 {
-                                    kc_hpm_tcp_send(c->fd, reply_buf);
+                                    kc_p2p_tcp_send(c->fd, reply_buf);
                                 } else {
-                                    kc_hpm_tcp_send(c->fd, "ERROR:not registered");
+                                    kc_p2p_tcp_send(c->fd, "ERROR:not registered");
                                 }
-                            } else if (ctx->n_pow_challenges >= KC_HPM_POW_CHALLENGES_MAX &&
-                                kc_hpm_find_pow_challenge(ctx, &peer_sa) < 0)
+                            } else if (ctx->n_pow_challenges >= KC_P2P_POW_CHALLENGES_MAX &&
+                                kc_p2p_find_pow_challenge(ctx, &peer_sa) < 0)
                             {
-                                kc_hpm_tcp_send(c->fd, "ERROR:busy");
+                                kc_p2p_tcp_send(c->fd, "ERROR:busy");
                             } else {
                                 char nonce[9];
                                 int nonce_i;
@@ -3907,18 +3907,18 @@ int kc_hpm_serve_index(
                                 snprintf(reply_buf + strlen(reply_buf),
                                     sizeof(reply_buf) - strlen(reply_buf), ":%d",
                                     ctx->pow_bits);
-                                if (!kc_hpm_store_pow_challenge(ctx, &peer_sa, id,
+                                if (!kc_p2p_store_pow_challenge(ctx, &peer_sa, id,
                                     reply_buf + 10))
                                 {
-                                    kc_hpm_tcp_send(c->fd, "ERROR:busy");
+                                    kc_p2p_tcp_send(c->fd, "ERROR:busy");
                                 } else {
-                                    kc_hpm_tcp_send(c->fd, reply_buf);
+                                    kc_p2p_tcp_send(c->fd, reply_buf);
                                 }
                             }
 
                         } else if (strcmp(cmd, "PUNCH_REQ2") == 0) {
-                            char self_id[KC_HPM_ID_MAX + 1] = {0};
-                            char target_id[KC_HPM_ID_MAX + 1] = {0};
+                            char self_id[KC_P2P_ID_MAX + 1] = {0};
+                            char target_id[KC_P2P_ID_MAX + 1] = {0};
                             char sess_id[64] = {0};
                             if (sscanf(cmd_buf, "PUNCH_REQ2:%63[^:]:%63[^:]:%63s", self_id, target_id, sess_id) == 3) {
                                 char *nl = strchr(sess_id, '\n'); if (nl) *nl = '\0';
@@ -3931,10 +3931,10 @@ int kc_hpm_serve_index(
                                     }
                                 }
                                 
-                                srv_idx = kc_hpm_find_peer(ctx, target_id);
+                                srv_idx = kc_p2p_find_peer(ctx, target_id);
 
                                 if (target_fd != -1 && srv_idx >= 0) {
-                                    char msg[KC_HPM_BUF];
+                                    char msg[KC_P2P_BUF];
                                     snprintf(msg, sizeof(msg), "PUNCH_CALL2:%s:%s\n", self_id, sess_id);
                                     
                                     while ((newline = (char *)memchr(line_start, '\n', (size_t)(c->buf + c->buf_len - line_start))) != NULL) {
@@ -3951,33 +3951,33 @@ int kc_hpm_serve_index(
                                         }
                                     }
                                     strncat(msg, "END\n", sizeof(msg) - strlen(msg) - 1);
-                                    kc_hpm_tcp_send(target_fd, msg);
+                                    kc_p2p_tcp_send(target_fd, msg);
                                     
-                                    kc_hpm_pending_punch_evict_stale(ctx);
-                                    if (ctx->n_pending_punches < KC_HPM_MAX_PENDING_PUNCHES) {
-                                        kc_hpm_pending_punch_t *pp = &ctx->pending_punches[ctx->n_pending_punches++];
+                                    kc_p2p_pending_punch_evict_stale(ctx);
+                                    if (ctx->n_pending_punches < KC_P2P_MAX_PENDING_PUNCHES) {
+                                        kc_p2p_pending_punch_t *pp = &ctx->pending_punches[ctx->n_pending_punches++];
                                         snprintf(pp->self_id, sizeof(pp->self_id), "%s", self_id);
                                         snprintf(pp->target_id, sizeof(pp->target_id), "%s", target_id);
                                         snprintf(pp->sess_id, sizeof(pp->sess_id), "%s", sess_id);
                                         pp->consumer_fd = c->fd;
                                         pp->ts = time(NULL);
                                     } else {
-                                        kc_hpm_tcp_send(c->fd, "ERROR:busy");
+                                        kc_p2p_tcp_send(c->fd, "ERROR:busy");
                                     }
                                 } else {
-                                    kc_hpm_tcp_send(c->fd, "ERROR:offline");
+                                    kc_p2p_tcp_send(c->fd, "ERROR:offline");
                                 }
                             }
                             
                         } else if (strcmp(cmd, "PUNCH_ACK2") == 0) {
-                            char ack_self_id[KC_HPM_ID_MAX + 1] = {0};
-                            char ack_target_id[KC_HPM_ID_MAX + 1] = {0};
+                            char ack_self_id[KC_P2P_ID_MAX + 1] = {0};
+                            char ack_target_id[KC_P2P_ID_MAX + 1] = {0};
                             char ack_sess_id[64] = {0};
                             if (sscanf(cmd_buf, "PUNCH_ACK2:%63[^:]:%63[^:]:%63s", ack_self_id, ack_target_id, ack_sess_id) >= 3) {
                                 char *nl = strchr(ack_sess_id, '\n'); if (nl) *nl = '\0';
-                                int pp_idx = kc_hpm_pending_punch_find(ctx, ack_self_id, ack_target_id, ack_sess_id);
+                                int pp_idx = kc_p2p_pending_punch_find(ctx, ack_self_id, ack_target_id, ack_sess_id);
                                 if (pp_idx >= 0) {
-                                    char ok2[KC_HPM_BUF];
+                                    char ok2[KC_P2P_BUF];
                                     snprintf(ok2, sizeof(ok2), "PUNCH_OK2:%s:%s\n", ack_self_id, ack_sess_id);
                                     while ((newline = (char *)memchr(line_start, '\n', (size_t)(c->buf + c->buf_len - line_start))) != NULL) {
                                         int llen = (int)(newline - line_start);
@@ -3993,42 +3993,42 @@ int kc_hpm_serve_index(
                                         }
                                     }
                                     strncat(ok2, "END\n", sizeof(ok2) - strlen(ok2) - 1);
-                                    kc_hpm_tcp_send(ctx->pending_punches[pp_idx].consumer_fd, ok2);
-                                    kc_hpm_pending_punch_remove(ctx, pp_idx);
+                                    kc_p2p_tcp_send(ctx->pending_punches[pp_idx].consumer_fd, ok2);
+                                    kc_p2p_pending_punch_remove(ctx, pp_idx);
                                 }
                             }
                             
                         } else if (strcmp(cmd, "DEREGISTER") == 0) {
-                            char dkey[KC_HPM_KEY_STR_SZ];
+                            char dkey[KC_P2P_KEY_STR_SZ];
                             if (sscanf(cmd_buf, "DEREGISTER:%63[^:]:KEY:%32[^\n]",
                                 id, dkey) == 2) {
-                                srv_idx = kc_hpm_find_peer(ctx, id);
+                                srv_idx = kc_p2p_find_peer(ctx, id);
                                 if (srv_idx >= 0 && strcmp(ctx->peers[srv_idx].key, dkey) == 0) {
-                                    kc_hpm_remove_peer(ctx, id);
-                                    kc_hpm_tcp_send(c->fd, "OK");
+                                    kc_p2p_remove_peer(ctx, id);
+                                    kc_p2p_tcp_send(c->fd, "OK");
                                 } else {
-                                    kc_hpm_tcp_send(c->fd, "ERROR:invalid key");
+                                    kc_p2p_tcp_send(c->fd, "ERROR:invalid key");
                                 }
                             }
 
                         } else if (strcmp(cmd, "LIST") == 0) {
-                            kc_hpm_evict_stale(ctx);
+                            kc_p2p_evict_stale(ctx);
                             for (srv_idx = 0; srv_idx < ctx->n_peers; srv_idx++) {
                                 snprintf(reply_buf, sizeof(reply_buf), "PEER:%s",
                                     ctx->peers[srv_idx].id);
-                                kc_hpm_tcp_send(c->fd, reply_buf);
+                                kc_p2p_tcp_send(c->fd, reply_buf);
                             }
-                            kc_hpm_tcp_send(c->fd, "END");
+                            kc_p2p_tcp_send(c->fd, "END");
 
                         } else if (strcmp(cmd, "LOOKUP") == 0) {
                             if (sscanf(cmd_buf, "LOOKUP:%63[^\n]", id) == 1) {
-                                srv_idx = kc_hpm_find_peer(ctx, id);
+                                srv_idx = kc_p2p_find_peer(ctx, id);
                                 if (srv_idx >= 0) {
                                     snprintf(reply_buf, sizeof(reply_buf), "PEER:%s",
                                         ctx->peers[srv_idx].id);
-                                    kc_hpm_tcp_send(c->fd, reply_buf);
+                                    kc_p2p_tcp_send(c->fd, reply_buf);
                                 } else {
-                                    kc_hpm_tcp_send(c->fd, "NOT_FOUND");
+                                    kc_p2p_tcp_send(c->fd, "NOT_FOUND");
                                 }
                             }
                         }
@@ -4045,12 +4045,12 @@ int kc_hpm_serve_index(
                 }
             }
         }
-        kc_hpm_unlock(ctx);
+        kc_p2p_unlock(ctx);
     }
 
-    KC_HPM_FD_CLOSE(tcp_fd);
-    kc_hpm_platform_cleanup();
-    return KC_HPM_OK;
+    KC_P2P_FD_CLOSE(tcp_fd);
+    kc_p2p_platform_cleanup();
+    return KC_P2P_OK;
 }
 
 /**
@@ -4077,19 +4077,19 @@ int kc_hpm_serve_index(
  * Save key.
  * @return Status code.
  */
-static void kc_hpm_save_key(const char *id, const char *key);
+static void kc_p2p_save_key(const char *id, const char *key);
 
 /**
  * Load key.
  * @return Status code.
  */
-static void kc_hpm_load_key(const char *id, char *key, size_t cap);
+static void kc_p2p_load_key(const char *id, char *key, size_t cap);
 
 /**
  * Mkdir p.
  * @return Status code.
  */
-static void kc_hpm_mkdir_p(char *path) {
+static void kc_p2p_mkdir_p(char *path) {
     char *p;
 #ifdef _WIN32
     for (p = path + 1; *p; p++) {
@@ -4113,15 +4113,15 @@ static void kc_hpm_mkdir_p(char *path) {
  * Save key.
  * @return Status code.
  */
-static void kc_hpm_save_key(const char *id, const char *key) {
+static void kc_p2p_save_key(const char *id, const char *key) {
     const char *home;
     char dir[512];
     char path[576];
     FILE *f;
     home = getenv("HOME");
     if (!home) return;
-    snprintf(dir, sizeof(dir), "%s/.local/share/hpm/keys", home);
-    kc_hpm_mkdir_p(dir);
+    snprintf(dir, sizeof(dir), "%s/.local/share/p2p/keys", home);
+    kc_p2p_mkdir_p(dir);
     snprintf(path, sizeof(path), "%s/%s", dir, id);
     f = fopen(path, "w");
     if (f) { fprintf(f, "%s\n", key); fclose(f); }
@@ -4136,13 +4136,13 @@ static void kc_hpm_save_key(const char *id, const char *key) {
  * Load key.
  * @return Status code.
  */
-static void kc_hpm_load_key(const char *id, char *key, size_t cap) {
+static void kc_p2p_load_key(const char *id, char *key, size_t cap) {
     const char *home;
     char path[576];
     FILE *f;
     home = getenv("HOME");
     if (!home) return;
-    snprintf(path, sizeof(path), "%s/.local/share/hpm/keys/%s", home, id);
+    snprintf(path, sizeof(path), "%s/.local/share/p2p/keys/%s", home, id);
     f = fopen(path, "r");
     if (f) {
         if (fgets(key, (int)cap, f)) {
@@ -4162,31 +4162,31 @@ static void kc_hpm_load_key(const char *id, char *key, size_t cap) {
  * Deregister.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_deregister(
-    kc_hpm_t *ctx,
+int kc_p2p_deregister(
+    kc_p2p_t *ctx,
     const char *index_host,
     unsigned short index_port,
     const char *id)
 {
-    char key[KC_HPM_KEY_STR_SZ] = "";
-    char cmd[KC_HPM_BUF];
-    char reply[KC_HPM_BUF];
+    char key[KC_P2P_KEY_STR_SZ] = "";
+    char cmd[KC_P2P_BUF];
+    char reply[KC_P2P_BUF];
 
     (void)ctx;
-    kc_hpm_load_key(id, key, sizeof(key));
-    if (key[0] == '\0') return KC_HPM_ENOENT;
+    kc_p2p_load_key(id, key, sizeof(key));
+    if (key[0] == '\0') return KC_P2P_ENOENT;
 
     snprintf(cmd, sizeof(cmd), "DEREGISTER:%s:KEY:%s", id, key);
     {
-    kc_hpm_fd_t fd = kc_hpm_tcp_connect(index_host, index_port);
-        if (KC_HPM_ISERR(fd)) return KC_HPM_ENET;
-        if (kc_hpm_tcp_send(fd, cmd) != KC_HPM_OK) { KC_HPM_FD_CLOSE(fd); return KC_HPM_ENET; }
-        if (kc_hpm_tcp_readline(fd, reply, (int)sizeof(reply), 5) < 0) { KC_HPM_FD_CLOSE(fd); return KC_HPM_ETIMEOUT; }
-        KC_HPM_FD_CLOSE(fd);
+    kc_p2p_fd_t fd = kc_p2p_tcp_connect(index_host, index_port);
+        if (KC_P2P_ISERR(fd)) return KC_P2P_ENET;
+        if (kc_p2p_tcp_send(fd, cmd) != KC_P2P_OK) { KC_P2P_FD_CLOSE(fd); return KC_P2P_ENET; }
+        if (kc_p2p_tcp_readline(fd, reply, (int)sizeof(reply), 5) < 0) { KC_P2P_FD_CLOSE(fd); return KC_P2P_ETIMEOUT; }
+        KC_P2P_FD_CLOSE(fd);
     }
 
-    if (strcmp(reply, "OK") != 0) return KC_HPM_ERROR;
-    return KC_HPM_OK;
+    if (strcmp(reply, "OK") != 0) return KC_P2P_ERROR;
+    return KC_P2P_OK;
 }
 
 /**
@@ -4198,38 +4198,38 @@ int kc_hpm_deregister(
  * Wait.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_wait(
-    kc_hpm_t *ctx,
+int kc_p2p_wait(
+    kc_p2p_t *ctx,
     const char *index_host,
     unsigned short index_port,
     const char *self_id,
     unsigned short bind_port)
 {
-    kc_hpm_fd_t control_fd;
-    char send_buf[KC_HPM_BUF];
-    char recv_buf[KC_HPM_BUF];
-    kc_hpm_fd_t udp_fd = KC_HPM_FD_INVALID;
+    kc_p2p_fd_t control_fd;
+    char send_buf[KC_P2P_BUF];
+    char recv_buf[KC_P2P_BUF];
+    kc_p2p_fd_t udp_fd = KC_P2P_FD_INVALID;
     time_t last_heartbeat;
 
     (void)bind_port;
-    if (!ctx) return KC_HPM_ERROR;
-    if (ctx->proto != KC_HPM_PROTO_TCP && ctx->proto != KC_HPM_PROTO_UDP)
-        return KC_HPM_ERROR;
-    if (ctx->bind_port == 0) return KC_HPM_ERROR;
+    if (!ctx) return KC_P2P_ERROR;
+    if (ctx->proto != KC_P2P_PROTO_TCP && ctx->proto != KC_P2P_PROTO_UDP)
+        return KC_P2P_ERROR;
+    if (ctx->bind_port == 0) return KC_P2P_ERROR;
 
-    control_fd = kc_hpm_tcp_connect(index_host, index_port);
-    if (KC_HPM_ISERR(control_fd)) return KC_HPM_ENET;
+    control_fd = kc_p2p_tcp_connect(index_host, index_port);
+    if (KC_P2P_ISERR(control_fd)) return KC_P2P_ENET;
 
-    udp_fd = kc_hpm_create_socket("0.0.0.0", 0);
-    if (KC_HPM_ISERR(udp_fd)) { KC_HPM_FD_CLOSE(control_fd); return KC_HPM_ENET; }
+    udp_fd = kc_p2p_create_socket("0.0.0.0", 0);
+    if (KC_P2P_ISERR(udp_fd)) { KC_P2P_FD_CLOSE(control_fd); return KC_P2P_ENET; }
 
     snprintf(send_buf, sizeof(send_buf), "REGISTER:%s", self_id);
-    if (kc_hpm_tcp_send(control_fd, send_buf) != KC_HPM_OK ||
-        kc_hpm_tcp_readline(control_fd, recv_buf, (int)sizeof(recv_buf), 10) < 0)
+    if (kc_p2p_tcp_send(control_fd, send_buf) != KC_P2P_OK ||
+        kc_p2p_tcp_readline(control_fd, recv_buf, (int)sizeof(recv_buf), 10) < 0)
     {
-        KC_HPM_FD_CLOSE(control_fd);
-        if (!KC_HPM_ISERR(udp_fd)) KC_HPM_FD_CLOSE(udp_fd);
-        return KC_HPM_ENET;
+        KC_P2P_FD_CLOSE(control_fd);
+        if (!KC_P2P_ISERR(udp_fd)) KC_P2P_FD_CLOSE(udp_fd);
+        return KC_P2P_ENET;
     }
 
     if (strncmp(recv_buf, "CHALLENGE:", 10) == 0) {
@@ -4239,52 +4239,52 @@ int kc_hpm_wait(
         unsigned int chall_bits;
 
         if (sscanf(recv_buf, "CHALLENGE:%16[^:]:%u", nonce, &chall_bits) != 2) {
-            KC_HPM_FD_CLOSE(control_fd);
-            if (!KC_HPM_ISERR(udp_fd)) KC_HPM_FD_CLOSE(udp_fd);
-            return KC_HPM_ERROR;
+            KC_P2P_FD_CLOSE(control_fd);
+            if (!KC_P2P_ISERR(udp_fd)) KC_P2P_FD_CLOSE(udp_fd);
+            return KC_P2P_ERROR;
         }
-        fprintf(stderr, "hpm: connecting...\n");
-        if (!kc_hpm_solve_register_pow(ctx->pass, nonce, self_id,
+        fprintf(stderr, "p2p: connecting...\n");
+        if (!kc_p2p_solve_register_pow(ctx->pass, nonce, self_id,
             (int)chall_bits, solution, sizeof(solution), proof, sizeof(proof)))
         {
-            KC_HPM_FD_CLOSE(control_fd);
-            if (!KC_HPM_ISERR(udp_fd)) KC_HPM_FD_CLOSE(udp_fd);
-            return KC_HPM_ERROR;
+            KC_P2P_FD_CLOSE(control_fd);
+            if (!KC_P2P_ISERR(udp_fd)) KC_P2P_FD_CLOSE(udp_fd);
+            return KC_P2P_ERROR;
         }
         snprintf(send_buf, sizeof(send_buf),
             "REGISTER:%s:SOLUTION:%s:PROOF:%s", self_id, solution, proof);
-        if (kc_hpm_tcp_send(control_fd, send_buf) != KC_HPM_OK ||
-            kc_hpm_tcp_readline(control_fd, recv_buf, (int)sizeof(recv_buf), 10) < 0)
+        if (kc_p2p_tcp_send(control_fd, send_buf) != KC_P2P_OK ||
+            kc_p2p_tcp_readline(control_fd, recv_buf, (int)sizeof(recv_buf), 10) < 0)
         {
-            KC_HPM_FD_CLOSE(control_fd);
-            if (!KC_HPM_ISERR(udp_fd)) KC_HPM_FD_CLOSE(udp_fd);
-            return KC_HPM_ENET;
+            KC_P2P_FD_CLOSE(control_fd);
+            if (!KC_P2P_ISERR(udp_fd)) KC_P2P_FD_CLOSE(udp_fd);
+            return KC_P2P_ENET;
         }
     } else {
-        KC_HPM_FD_CLOSE(control_fd);
-        if (!KC_HPM_ISERR(udp_fd)) KC_HPM_FD_CLOSE(udp_fd);
-        return KC_HPM_ERROR;
+        KC_P2P_FD_CLOSE(control_fd);
+        if (!KC_P2P_ISERR(udp_fd)) KC_P2P_FD_CLOSE(udp_fd);
+        return KC_P2P_ERROR;
     }
 
     {
-        char obs_key[KC_HPM_KEY_STR_SZ];
+        char obs_key[KC_P2P_KEY_STR_SZ];
         if (sscanf(recv_buf, "OK:KEY:%32[^\n]", obs_key) != 1) {
-            fprintf(stderr, "hpm: registration failed: %s\n", recv_buf);
-            KC_HPM_FD_CLOSE(control_fd);
-            if (!KC_HPM_ISERR(udp_fd)) KC_HPM_FD_CLOSE(udp_fd);
-            return KC_HPM_ERROR;
+            fprintf(stderr, "p2p: registration failed: %s\n", recv_buf);
+            KC_P2P_FD_CLOSE(control_fd);
+            if (!KC_P2P_ISERR(udp_fd)) KC_P2P_FD_CLOSE(udp_fd);
+            return KC_P2P_ERROR;
         }
-        memcpy(ctx->key, obs_key, KC_HPM_KEY_STR_SZ);
-        ctx->key[KC_HPM_KEY_STR_SZ - 1] = '\0';
-        kc_hpm_save_key(self_id, ctx->key);
+        memcpy(ctx->key, obs_key, KC_P2P_KEY_STR_SZ);
+        ctx->key[KC_P2P_KEY_STR_SZ - 1] = '\0';
+        kc_p2p_save_key(self_id, ctx->key);
     }
 
-    fprintf(stderr, "hpm: published %s backend 127.0.0.1:%u as '%s'\n",
-        ctx->proto == KC_HPM_PROTO_TCP ? "tcp" : "udp",
+    fprintf(stderr, "p2p: published %s backend 127.0.0.1:%u as '%s'\n",
+        ctx->proto == KC_P2P_PROTO_TCP ? "tcp" : "udp",
         (unsigned)ctx->bind_port, self_id);
 
     {
-        kc_hpm_udp_server_session_t *sessions;
+        kc_p2p_udp_server_session_t *sessions;
         int n_sessions;
         int cap_sessions;
         int n, i;
@@ -4294,10 +4294,10 @@ int kc_hpm_wait(
         cap_sessions = 0;
         last_heartbeat = time(NULL);
 
-        kc_hpm_set_nonblock(control_fd);
-        kc_hpm_set_nonblock(udp_fd);
+        kc_p2p_set_nonblock(control_fd);
+        kc_p2p_set_nonblock(udp_fd);
 
-        while (!kc_hpm_stop_requested) {
+        while (!kc_p2p_stop_requested) {
             fd_set fds;
             struct timeval tv;
             int maxfd;
@@ -4309,9 +4309,9 @@ int kc_hpm_wait(
 
             for (i = 0; i < n_sessions; i++) {
                 if (!sessions[i].active) continue;
-                if (sessions[i].backend_fd != KC_HPM_FD_INVALID) {
+                if (sessions[i].backend_fd != KC_P2P_FD_INVALID) {
                     if (sessions[i].is_tcp &&
-                        !kc_hpm_stream_can_send_data(&sessions[i].stream) &&
+                        !kc_p2p_stream_can_send_data(&sessions[i].stream) &&
                         !sessions[i].stream.out.local_eof)
                         continue;
                     FD_SET(sessions[i].backend_fd, &fds);
@@ -4322,74 +4322,74 @@ int kc_hpm_wait(
             tv.tv_sec = 1; tv.tv_usec = 0;
             n = select(maxfd + 1, &fds, NULL, NULL, &tv);
             if (n < 0) continue;
-            if (kc_hpm_stop_requested) break;
+            if (kc_p2p_stop_requested) break;
 
-            if (time(NULL) - last_heartbeat >= KC_HPM_HEARTBEAT_S) {
+            if (time(NULL) - last_heartbeat >= KC_P2P_HEARTBEAT_S) {
                 snprintf(send_buf, sizeof(send_buf), "REGISTER:%s", self_id);
-                kc_hpm_tcp_send(control_fd, send_buf);
+                kc_p2p_tcp_send(control_fd, send_buf);
                 last_heartbeat = time(NULL);
             }
 
             if (FD_ISSET(control_fd, &fds)) {
-                if (kc_hpm_tcp_readline(control_fd, recv_buf,
+                if (kc_p2p_tcp_readline(control_fd, recv_buf,
                     (int)sizeof(recv_buf), 0) > 0)
                 {
-                    char conn_id[KC_HPM_ID_MAX + 1];
-                    char remote_token[KC_HPM_ADDR_MAX + 1];
-                    char sess_hex[KC_HPM_STREAM_SESSION_ID_SZ * 2 + 1];
-                    unsigned char sess_id[KC_HPM_STREAM_SESSION_ID_SZ];
+                    char conn_id[KC_P2P_ID_MAX + 1];
+                    char remote_token[KC_P2P_ADDR_MAX + 1];
+                    char sess_hex[KC_P2P_STREAM_SESSION_ID_SZ * 2 + 1];
+                    unsigned char sess_id[KC_P2P_STREAM_SESSION_ID_SZ];
 
                     memset(sess_hex, 0, sizeof(sess_hex));
 
                     if (sscanf(recv_buf, "PUNCH_CALL2:%63[^:]:%47s", conn_id,
                         remote_token) == 2)
                     {
-                        if (ctx->proto == KC_HPM_PROTO_TCP) {
+                        if (ctx->proto == KC_P2P_PROTO_TCP) {
                             memcpy(sess_hex, remote_token,
-                                KC_HPM_STREAM_SESSION_ID_SZ * 2);
-                            sess_hex[KC_HPM_STREAM_SESSION_ID_SZ * 2] = '\0';
-                            if (!kc_hpm_hex_decode(sess_hex, sess_id, sizeof(sess_id)))
+                                KC_P2P_STREAM_SESSION_ID_SZ * 2);
+                            sess_hex[KC_P2P_STREAM_SESSION_ID_SZ * 2] = '\0';
+                            if (!kc_p2p_hex_decode(sess_hex, sess_id, sizeof(sess_id)))
                                 continue;
                         }
 
                         {
                             char lbuf[128];
-                            while (kc_hpm_tcp_readline(control_fd, lbuf, sizeof(lbuf), 5) > 0) {
+                            while (kc_p2p_tcp_readline(control_fd, lbuf, sizeof(lbuf), 5) > 0) {
                                 strncat(recv_buf, "\n", sizeof(recv_buf) - strlen(recv_buf) - 1);
                                 strncat(recv_buf, lbuf, sizeof(recv_buf) - strlen(recv_buf) - 1);
                                 if (strcmp(lbuf, "END") == 0) break;
                             }
                         }
-                        kc_hpm_candidate_t remote_cands[KC_HPM_CANDIDATES_MAX];
+                        kc_p2p_candidate_t remote_cands[KC_P2P_CANDIDATES_MAX];
                         int remote_cand_count = 0;
-                        kc_hpm_parse_remote_candidates(recv_buf, remote_cands, &remote_cand_count);
-                        kc_hpm_candidate_t my_cands[KC_HPM_CANDIDATES_MAX];
+                        kc_p2p_parse_remote_candidates(recv_buf, remote_cands, &remote_cand_count);
+                        kc_p2p_candidate_t my_cands[KC_P2P_CANDIDATES_MAX];
                         int my_cand_count = 0;
-                        char ack_buf[KC_HPM_BUF];
+                        char ack_buf[KC_P2P_BUF];
                         const char *ack_sess = sess_hex[0] ? sess_hex : remote_token;
 
-                        kc_hpm_gather_candidates(ctx, udp_fd, my_cands,
-                            KC_HPM_CANDIDATES_MAX, &my_cand_count);
+                        kc_p2p_gather_candidates(ctx, udp_fd, my_cands,
+                            KC_P2P_CANDIDATES_MAX, &my_cand_count);
                         snprintf(ack_buf, sizeof(ack_buf), "PUNCH_ACK2:%s:%s:%s\n",
                             self_id, conn_id, ack_sess);
                         for (int ci = 0; ci < my_cand_count; ci++) {
                             char cbuf[128];
                             const char *tname = "host";
-                            if (my_cands[ci].type == KC_HPM_CAND_LAN) tname = "lan";
-                            else if (my_cands[ci].type == KC_HPM_CAND_PUBLIC) tname = "public";
-                            else if (my_cands[ci].type == KC_HPM_CAND_SRFLX) tname = "srflx";
+                            if (my_cands[ci].type == KC_P2P_CAND_LAN) tname = "lan";
+                            else if (my_cands[ci].type == KC_P2P_CAND_PUBLIC) tname = "public";
+                            else if (my_cands[ci].type == KC_P2P_CAND_SRFLX) tname = "srflx";
                             snprintf(cbuf, sizeof(cbuf), "CAND:%s:%s:%u\n",
                                 tname, my_cands[ci].addr, my_cands[ci].port);
                             strncat(ack_buf, cbuf, sizeof(ack_buf) - strlen(ack_buf) - 1);
                         }
                         strncat(ack_buf, "END\n", sizeof(ack_buf) - strlen(ack_buf) - 1);
-                        kc_hpm_tcp_send(control_fd, ack_buf);
+                        kc_p2p_tcp_send(control_fd, ack_buf);
                         
                         struct sockaddr_in peer;
                         memset(&peer, 0, sizeof(peer));
-                        if (kc_hpm_punch_select(ctx, ctx->sweep, udp_fd, ack_sess,
+                        if (kc_p2p_punch_select(ctx, ctx->sweep, udp_fd, ack_sess,
                             self_id, conn_id, remote_cands, remote_cand_count,
-                            &peer) != KC_HPM_OK)
+                            &peer) != KC_P2P_OK)
                             continue;
 
                         int found = -1;
@@ -4402,39 +4402,39 @@ int kc_hpm_wait(
                         }
 
                         if (found < 0) {
-                            kc_hpm_udp_server_session_t sess;
+                            kc_p2p_udp_server_session_t sess;
                             memset(&sess, 0, sizeof(sess));
                             sess.peer_addr = peer;
                             sess.last_rx = time(NULL);
                             sess.last_ka = sess.last_rx;
-                            sess.is_tcp = (ctx->proto == KC_HPM_PROTO_TCP) ? 1 : 0;
-                            sess.tcp_fd = KC_HPM_FD_INVALID;
+                            sess.is_tcp = (ctx->proto == KC_P2P_PROTO_TCP) ? 1 : 0;
+                            sess.tcp_fd = KC_P2P_FD_INVALID;
 
                             if (sess.is_tcp) {
-                                sess.backend_fd = kc_hpm_connect_local_tcp(ctx->bind_port);
-                                if (KC_HPM_ISERR(sess.backend_fd)) {
-                                    fprintf(stderr, "hpm: local backend connect failed on 127.0.0.1:%u\n",
+                                sess.backend_fd = kc_p2p_connect_local_tcp(ctx->bind_port);
+                                if (KC_P2P_ISERR(sess.backend_fd)) {
+                                    fprintf(stderr, "p2p: local backend connect failed on 127.0.0.1:%u\n",
                                         (unsigned)ctx->bind_port);
                                     continue;
                                 }
-                                kc_hpm_stream_init(&sess.stream, 0, sess_id, sess_hex);
-                                if (!kc_hpm_stream_crypto_init(&sess.stream)) {
-                                    KC_HPM_FD_CLOSE(sess.backend_fd);
+                                kc_p2p_stream_init(&sess.stream, 0, sess_id, sess_hex);
+                                if (!kc_p2p_stream_crypto_init(&sess.stream)) {
+                                    KC_P2P_FD_CLOSE(sess.backend_fd);
                                     continue;
                                 }
                             } else {
-                                sess.backend_fd = kc_hpm_create_socket("0.0.0.0", 0);
-                                if (KC_HPM_ISERR(sess.backend_fd)) continue;
+                                sess.backend_fd = kc_p2p_create_socket("0.0.0.0", 0);
+                                if (KC_P2P_ISERR(sess.backend_fd)) continue;
                             }
                             sess.active = 1;
 
                             if (n_sessions >= cap_sessions) {
                                 int new_cap = cap_sessions == 0 ? 8 : cap_sessions * 2;
-                                kc_hpm_udp_server_session_t *new_sessions =
-                                    (kc_hpm_udp_server_session_t *)realloc(
+                                kc_p2p_udp_server_session_t *new_sessions =
+                                    (kc_p2p_udp_server_session_t *)realloc(
                                         sessions, (size_t)new_cap * sizeof(*sessions));
                                 if (!new_sessions) {
-                                    KC_HPM_FD_CLOSE(sess.backend_fd);
+                                    KC_P2P_FD_CLOSE(sess.backend_fd);
                                     continue;
                                 }
                                 sessions = new_sessions;
@@ -4442,10 +4442,10 @@ int kc_hpm_wait(
                             }
                             sessions[n_sessions++] = sess;
 
-                            sendto(udp_fd, "HPM_PUNCH:server", 16, 0,
+                            sendto(udp_fd, "P2P_PUNCH:server", 16, 0,
                                 (const struct sockaddr *)&peer, sizeof(peer));
                         } else {
-                            sendto(udp_fd, "HPM_PUNCH:server", 16, 0,
+                            sendto(udp_fd, "P2P_PUNCH:server", 16, 0,
                                 (const struct sockaddr *)&peer, sizeof(peer));
                         }
                     }
@@ -4453,7 +4453,7 @@ int kc_hpm_wait(
             }
 
             if (FD_ISSET(udp_fd, &fds)) {
-                char buf[KC_HPM_BUF];
+                char buf[KC_P2P_BUF];
                 struct sockaddr_in from;
                 socklen_t fromlen = sizeof(from);
                 n = (int)recvfrom(udp_fd, buf, sizeof(buf), 0,
@@ -4471,22 +4471,22 @@ int kc_hpm_wait(
                     }
 
                     if (found >= 0) {
-                        if (strncmp(buf, "HPM_KA:", 7) == 0 ||
-                            strncmp(buf, "HPM_PUNCH:", 10) == 0 ||
+                        if (strncmp(buf, "P2P_KA:", 7) == 0 ||
+                            strncmp(buf, "P2P_PUNCH:", 10) == 0 ||
                             strncmp(buf, "PUNCH_PING:", 11) == 0 ||
                             strncmp(buf, "PUNCH_PONG:", 11) == 0) {
                             sessions[found].last_rx = time(NULL);
                         } else {
                             if (sessions[found].is_tcp) {
-                                if (sessions[found].backend_fd != KC_HPM_FD_INVALID &&
-                                    kc_hpm_stream_process_packet(ctx, udp_fd,
+                                if (sessions[found].backend_fd != KC_P2P_FD_INVALID &&
+                                    kc_p2p_stream_process_packet(ctx, udp_fd,
                                         &sessions[found].peer_addr,
                                         &sessions[found].stream,
                                         sessions[found].backend_fd,
                                         (const unsigned char *)buf,
                                         (size_t)n) != 0)
                                 {
-                                    kc_hpm_server_session_close(&sessions[found]);
+                                    kc_p2p_server_session_close(&sessions[found]);
                                 }
                             } else {
                                 struct sockaddr_in backend_addr;
@@ -4517,18 +4517,18 @@ int kc_hpm_wait(
                             sessions[unset].last_ka = sessions[unset].last_rx;
                             sendto(udp_fd, buf, (size_t)n, 0,
                                 (const struct sockaddr *)&from, sizeof(from));
-                            if (strncmp(buf, "HPM_PUNCH:", 10) != 0 &&
-                                strncmp(buf, "HPM_KA:", 7) != 0) {
+                            if (strncmp(buf, "P2P_PUNCH:", 10) != 0 &&
+                                strncmp(buf, "P2P_KA:", 7) != 0) {
                                 if (sessions[unset].is_tcp) {
-                                    if (sessions[unset].backend_fd != KC_HPM_FD_INVALID &&
-                                        kc_hpm_stream_process_packet(ctx, udp_fd,
+                                    if (sessions[unset].backend_fd != KC_P2P_FD_INVALID &&
+                                        kc_p2p_stream_process_packet(ctx, udp_fd,
                                             &sessions[unset].peer_addr,
                                             &sessions[unset].stream,
                                             sessions[unset].backend_fd,
                                             (const unsigned char *)buf,
                                             (size_t)n) != 0)
                                     {
-                                        kc_hpm_server_session_close(&sessions[unset]);
+                                        kc_p2p_server_session_close(&sessions[unset]);
                                     }
                                 } else {
                                     struct sockaddr_in backend_addr;
@@ -4540,7 +4540,7 @@ int kc_hpm_wait(
                                         (const struct sockaddr *)&backend_addr, sizeof(backend_addr));
                                 }
                             }
-                        } else if (strncmp(buf, "HPM_PUNCH:", 10) == 0) {
+                        } else if (strncmp(buf, "P2P_PUNCH:", 10) == 0) {
                             sendto(udp_fd, buf, (size_t)n, 0,
                                 (const struct sockaddr *)&from, sizeof(from));
                         }
@@ -4550,18 +4550,18 @@ int kc_hpm_wait(
 
             for (i = 0; i < n_sessions; i++) {
                 if (!sessions[i].active) continue;
-                if (sessions[i].backend_fd == KC_HPM_FD_INVALID) continue;
+                if (sessions[i].backend_fd == KC_P2P_FD_INVALID) continue;
                 if (!FD_ISSET(sessions[i].backend_fd, &fds)) continue;
 
                 if (sessions[i].is_tcp) {
-                    if (kc_hpm_stream_pump_tcp(ctx, udp_fd,
+                    if (kc_p2p_stream_pump_tcp(ctx, udp_fd,
                         &sessions[i].peer_addr, &sessions[i].stream,
                         sessions[i].backend_fd) != 0)
                     {
-                        kc_hpm_server_session_close(&sessions[i]);
+                        kc_p2p_server_session_close(&sessions[i]);
                     }
                 } else {
-                    char buf[KC_HPM_BUF];
+                    char buf[KC_P2P_BUF];
                     struct sockaddr_in bfrom;
                     socklen_t bfromlen = sizeof(bfrom);
                     n = (int)recvfrom(sessions[i].backend_fd, buf, sizeof(buf), 0,
@@ -4578,42 +4578,42 @@ int kc_hpm_wait(
             for (i = 0; i < n_sessions; i++) {
                 if (!sessions[i].active) continue;
                 if (sessions[i].is_tcp) {
-                    if (kc_hpm_stream_tick(ctx, udp_fd,
+                    if (kc_p2p_stream_tick(ctx, udp_fd,
                         &sessions[i].peer_addr, &sessions[i].stream) != 0)
                     {
-                        kc_hpm_server_session_close(&sessions[i]);
+                        kc_p2p_server_session_close(&sessions[i]);
                         continue;
                     }
-                    if (kc_hpm_stream_is_done(&sessions[i].stream)) {
-                        kc_hpm_server_session_close(&sessions[i]);
+                    if (kc_p2p_stream_is_done(&sessions[i].stream)) {
+                        kc_p2p_server_session_close(&sessions[i]);
                         continue;
                     }
                 }
-                if (time(NULL) - sessions[i].last_ka > KC_HPM_KEEPALIVE_S) {
-                    sendto(udp_fd, "HPM_KA:", 7, 0,
+                if (time(NULL) - sessions[i].last_ka > KC_P2P_KEEPALIVE_S) {
+                    sendto(udp_fd, "P2P_KA:", 7, 0,
                         (const struct sockaddr *)&sessions[i].peer_addr,
                         sizeof(sessions[i].peer_addr));
                     sessions[i].last_ka = time(NULL);
                 }
-                if (time(NULL) - sessions[i].last_rx > KC_HPM_DISCONNECT_S) {
-                    kc_hpm_server_session_close(&sessions[i]);
+                if (time(NULL) - sessions[i].last_rx > KC_P2P_DISCONNECT_S) {
+                    kc_p2p_server_session_close(&sessions[i]);
                 }
             }
         }
 
         for (i = 0; i < n_sessions; i++) {
             if (!sessions[i].active) continue;
-            kc_hpm_server_session_close(&sessions[i]);
+            kc_p2p_server_session_close(&sessions[i]);
         }
         free(sessions);
     }
 
     if (ctx->key[0] != '\0')
-        kc_hpm_deregister(ctx, index_host, index_port, self_id);
+        kc_p2p_deregister(ctx, index_host, index_port, self_id);
 
-    KC_HPM_FD_CLOSE(control_fd);
-    KC_HPM_FD_CLOSE(udp_fd);
-    return KC_HPM_OK;
+    KC_P2P_FD_CLOSE(control_fd);
+    KC_P2P_FD_CLOSE(udp_fd);
+    return KC_P2P_OK;
 }
 
 /**
@@ -4633,46 +4633,46 @@ int kc_hpm_wait(
  * @param remote_cand_count Remote candidate count.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_send_punch_req_cands(
-    kc_hpm_fd_t ctrl_fd,
+static int kc_p2p_send_punch_req_cands(
+    kc_p2p_fd_t ctrl_fd,
     const char *self_id,
     const char *target_id,
     const char *session_id,
-    kc_hpm_candidate_t *cands,
+    kc_p2p_candidate_t *cands,
     int cand_count,
-    kc_hpm_candidate_t *remote_cands,
+    kc_p2p_candidate_t *remote_cands,
     int *remote_cand_count)
 {
-    char send_buf[KC_HPM_BUF];
-    char recv_buf[KC_HPM_BUF];
+    char send_buf[KC_P2P_BUF];
+    char recv_buf[KC_P2P_BUF];
     
     snprintf(send_buf, sizeof(send_buf), "PUNCH_REQ2:%s:%s:%s\n", self_id, target_id, session_id ? session_id : "0");
     for (int i = 0; i < cand_count; i++) {
         char cbuf[128];
         const char *tname = "host";
-        if (cands[i].type == KC_HPM_CAND_LAN) tname = "lan";
-        else if (cands[i].type == KC_HPM_CAND_PUBLIC) tname = "public";
-        else if (cands[i].type == KC_HPM_CAND_SRFLX) tname = "srflx";
+        if (cands[i].type == KC_P2P_CAND_LAN) tname = "lan";
+        else if (cands[i].type == KC_P2P_CAND_PUBLIC) tname = "public";
+        else if (cands[i].type == KC_P2P_CAND_SRFLX) tname = "srflx";
         snprintf(cbuf, sizeof(cbuf), "CAND:%s:%s:%u\n", tname, cands[i].addr, cands[i].port);
         strcat(send_buf, cbuf);
     }
     strcat(send_buf, "END\n");
     
-    if (kc_hpm_tcp_send(ctrl_fd, send_buf) != KC_HPM_OK)
-        return KC_HPM_ENET;
-    if (kc_hpm_tcp_readline(ctrl_fd, recv_buf, (int)sizeof(recv_buf), 20) < 0)
-        return KC_HPM_OK;
+    if (kc_p2p_tcp_send(ctrl_fd, send_buf) != KC_P2P_OK)
+        return KC_P2P_ENET;
+    if (kc_p2p_tcp_readline(ctrl_fd, recv_buf, (int)sizeof(recv_buf), 20) < 0)
+        return KC_P2P_OK;
     
     if (strncmp(recv_buf, "PUNCH_OK2:", 10) == 0) {
         char lbuf[128];
-        while (kc_hpm_tcp_readline(ctrl_fd, lbuf, sizeof(lbuf), 5) > 0) {
+        while (kc_p2p_tcp_readline(ctrl_fd, lbuf, sizeof(lbuf), 5) > 0) {
             strncat(recv_buf, "\n", sizeof(recv_buf) - strlen(recv_buf) - 1);
             strncat(recv_buf, lbuf, sizeof(recv_buf) - strlen(recv_buf) - 1);
             if (strcmp(lbuf, "END") == 0) break;
         }
-        kc_hpm_parse_remote_candidates(recv_buf, remote_cands, remote_cand_count);
+        kc_p2p_parse_remote_candidates(recv_buf, remote_cands, remote_cand_count);
     }
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -4692,26 +4692,26 @@ static int kc_hpm_send_punch_req_cands(
  * @param out_peer Out peer.
  * @return 0 on success, -1 on error.
  */
-static int kc_hpm_open_udp_session_cands(
-    kc_hpm_t *ctx,
+static int kc_p2p_open_udp_session_cands(
+    kc_p2p_t *ctx,
     int sweep_limit,
     int fd,
     const char *self_id,
     const char *target_id,
     const char *session_id,
-    kc_hpm_candidate_t *remote_cands,
+    kc_p2p_candidate_t *remote_cands,
     int remote_cand_count,
-    kc_hpm_fd_t *out_fd,
+    kc_p2p_fd_t *out_fd,
     struct sockaddr_in *out_peer,
-    kc_hpm_udp_consumer_session_t *sess)
+    kc_p2p_udp_consumer_session_t *sess)
 {
     struct sockaddr_in peer_addr;
     memset(&peer_addr, 0, sizeof(peer_addr));
 
-    int rc = kc_hpm_punch_select(ctx, sweep_limit, fd, session_id ? session_id : "0", self_id, target_id, remote_cands, remote_cand_count, &peer_addr);
-    if (rc != KC_HPM_OK) {
-        fprintf(stderr, "hpm: udp punch failed\n");
-        KC_HPM_FD_CLOSE(fd);
+    int rc = kc_p2p_punch_select(ctx, sweep_limit, fd, session_id ? session_id : "0", self_id, target_id, remote_cands, remote_cand_count, &peer_addr);
+    if (rc != KC_P2P_OK) {
+        fprintf(stderr, "p2p: udp punch failed\n");
+        KC_P2P_FD_CLOSE(fd);
         return rc;
     }
 
@@ -4720,7 +4720,7 @@ static int kc_hpm_open_udp_session_cands(
 
     *out_fd = fd;
     *out_peer = peer_addr;
-    return KC_HPM_OK;
+    return KC_P2P_OK;
 }
 
 /**
@@ -4732,74 +4732,74 @@ static int kc_hpm_open_udp_session_cands(
  * Connect.
  * @return 0 on success, -1 on error.
  */
-int kc_hpm_connect(
-    kc_hpm_t *ctx,
+int kc_p2p_connect(
+    kc_p2p_t *ctx,
     const char *index_host,
     unsigned short index_port,
     const char *self_id,
     const char *target_id,
     unsigned short bind_port)
 {
-    kc_hpm_fd_t ctrl_fd;
-    kc_hpm_fd_t local_fd;
-    kc_hpm_fd_t tcp_listen_fd;
-    kc_hpm_udp_consumer_session_t *sessions;
+    kc_p2p_fd_t ctrl_fd;
+    kc_p2p_fd_t local_fd;
+    kc_p2p_fd_t tcp_listen_fd;
+    kc_p2p_udp_consumer_session_t *sessions;
     int n_sessions, cap_sessions;
 
     (void)bind_port;
-    if (!ctx) return KC_HPM_ERROR;
-    if (ctx->bind_port == 0) return KC_HPM_ERROR;
-    if (kc_hpm_platform_init() != 0) return KC_HPM_ENET;
+    if (!ctx) return KC_P2P_ERROR;
+    if (ctx->bind_port == 0) return KC_P2P_ERROR;
+    if (kc_p2p_platform_init() != 0) return KC_P2P_ENET;
 
-    if (ctx->proto == KC_HPM_PROTO_UDP) {
-        local_fd = kc_hpm_create_socket("127.0.0.1", ctx->bind_port);
-        if (KC_HPM_ISERR(local_fd)) { kc_hpm_platform_cleanup(); return KC_HPM_ENET; }
-        tcp_listen_fd = KC_HPM_FD_INVALID;
+    if (ctx->proto == KC_P2P_PROTO_UDP) {
+        local_fd = kc_p2p_create_socket("127.0.0.1", ctx->bind_port);
+        if (KC_P2P_ISERR(local_fd)) { kc_p2p_platform_cleanup(); return KC_P2P_ENET; }
+        tcp_listen_fd = KC_P2P_FD_INVALID;
     } else {
-        local_fd = kc_hpm_create_socket("0.0.0.0", 0);
-        if (KC_HPM_ISERR(local_fd)) { kc_hpm_platform_cleanup(); return KC_HPM_ENET; }
-        tcp_listen_fd = kc_hpm_create_tcp_listener("127.0.0.1", ctx->bind_port);
-        if (KC_HPM_ISERR(tcp_listen_fd)) {
-            KC_HPM_FD_CLOSE(local_fd);
-            kc_hpm_platform_cleanup();
-            return KC_HPM_ENET;
+        local_fd = kc_p2p_create_socket("0.0.0.0", 0);
+        if (KC_P2P_ISERR(local_fd)) { kc_p2p_platform_cleanup(); return KC_P2P_ENET; }
+        tcp_listen_fd = kc_p2p_create_tcp_listener("127.0.0.1", ctx->bind_port);
+        if (KC_P2P_ISERR(tcp_listen_fd)) {
+            KC_P2P_FD_CLOSE(local_fd);
+            kc_p2p_platform_cleanup();
+            return KC_P2P_ENET;
         }
     }
 
-    ctrl_fd = kc_hpm_tcp_connect(index_host, index_port);
-    if (KC_HPM_ISERR(ctrl_fd)) {
-        KC_HPM_FD_CLOSE(local_fd);
-        if (!KC_HPM_ISERR(tcp_listen_fd)) KC_HPM_FD_CLOSE(tcp_listen_fd);
-        kc_hpm_platform_cleanup();
-        return KC_HPM_ENET;
+    ctrl_fd = kc_p2p_tcp_connect(index_host, index_port);
+    if (KC_P2P_ISERR(ctrl_fd)) {
+        KC_P2P_FD_CLOSE(local_fd);
+        if (!KC_P2P_ISERR(tcp_listen_fd)) KC_P2P_FD_CLOSE(tcp_listen_fd);
+        kc_p2p_platform_cleanup();
+        return KC_P2P_ENET;
     }
     {
-        char recv_buf[KC_HPM_BUF];
+        char recv_buf[KC_P2P_BUF];
         snprintf(recv_buf, sizeof(recv_buf), "LOOKUP:%s", target_id);
-        if (kc_hpm_tcp_send(ctrl_fd, recv_buf) != KC_HPM_OK ||
-            kc_hpm_tcp_readline(ctrl_fd, recv_buf, (int)sizeof(recv_buf), 5) < 0)
-        { KC_HPM_FD_CLOSE(ctrl_fd); KC_HPM_FD_CLOSE(local_fd); if (!KC_HPM_ISERR(tcp_listen_fd)) KC_HPM_FD_CLOSE(tcp_listen_fd); kc_hpm_platform_cleanup(); return KC_HPM_ENET; }
+        if (kc_p2p_tcp_send(ctrl_fd, recv_buf) != KC_P2P_OK ||
+            kc_p2p_tcp_readline(ctrl_fd, recv_buf, (int)sizeof(recv_buf), 5) < 0)
+        { KC_P2P_FD_CLOSE(ctrl_fd); KC_P2P_FD_CLOSE(local_fd); if (!KC_P2P_ISERR(tcp_listen_fd)) KC_P2P_FD_CLOSE(tcp_listen_fd); kc_p2p_platform_cleanup(); return KC_P2P_ENET; }
         if (strcmp(recv_buf, "NOT_FOUND") == 0)
-        { KC_HPM_FD_CLOSE(ctrl_fd); KC_HPM_FD_CLOSE(local_fd); if (!KC_HPM_ISERR(tcp_listen_fd)) KC_HPM_FD_CLOSE(tcp_listen_fd); kc_hpm_platform_cleanup(); return KC_HPM_ENOENT; }
+        { KC_P2P_FD_CLOSE(ctrl_fd); KC_P2P_FD_CLOSE(local_fd); if (!KC_P2P_ISERR(tcp_listen_fd)) KC_P2P_FD_CLOSE(tcp_listen_fd); kc_p2p_platform_cleanup(); return KC_P2P_ENOENT; }
         if (strcmp(recv_buf, "PEER:") == 0 ||
             strncmp(recv_buf, "PEER:", 5) != 0 ||
             strcmp(recv_buf + 5, target_id) != 0)
-        { KC_HPM_FD_CLOSE(ctrl_fd); KC_HPM_FD_CLOSE(local_fd); if (!KC_HPM_ISERR(tcp_listen_fd)) KC_HPM_FD_CLOSE(tcp_listen_fd); kc_hpm_platform_cleanup(); return KC_HPM_ERROR; }
+        { KC_P2P_FD_CLOSE(ctrl_fd); KC_P2P_FD_CLOSE(local_fd); if (!KC_P2P_ISERR(tcp_listen_fd)) KC_P2P_FD_CLOSE(tcp_listen_fd); kc_p2p_platform_cleanup(); return KC_P2P_ERROR; }
     }
-    KC_HPM_FD_CLOSE(ctrl_fd);
+    KC_P2P_FD_CLOSE(ctrl_fd);
 
     sessions = NULL;
     n_sessions = 0;
     cap_sessions = 0;
 
-    fprintf(stderr, "hpm: %s relay on 127.0.0.1:%u for %s\n",
-        ctx->proto == KC_HPM_PROTO_TCP ? "tcp" : "udp",
+    fprintf(stderr, "p2p: %s relay on 127.0.0.1:%u for %s\n",
+        ctx->proto == KC_P2P_PROTO_TCP ? "tcp" : "udp",
         (unsigned)ctx->bind_port, target_id);
 
-    kc_hpm_set_nonblock(local_fd);
-    if (!KC_HPM_ISERR(tcp_listen_fd)) kc_hpm_set_nonblock(tcp_listen_fd);
+    kc_p2p_set_nonblock(local_fd);
+    if (!KC_P2P_ISERR(tcp_listen_fd)) kc_p2p_set_nonblock(tcp_listen_fd);
 
-    while (!kc_hpm_stop_requested) {
+    while (!kc_p2p_stop_requested) {
         fd_set fds;
         struct timeval tv;
         int maxfd;
@@ -4809,7 +4809,7 @@ int kc_hpm_connect(
         FD_SET(local_fd, &fds);
         maxfd = (int)local_fd;
 
-        if (!KC_HPM_ISERR(tcp_listen_fd)) {
+        if (!KC_P2P_ISERR(tcp_listen_fd)) {
             FD_SET(tcp_listen_fd, &fds);
             if ((int)tcp_listen_fd > maxfd) maxfd = (int)tcp_listen_fd;
         }
@@ -4818,8 +4818,8 @@ int kc_hpm_connect(
             if (!sessions[i].active) continue;
             FD_SET(sessions[i].fd, &fds);
             if ((int)sessions[i].fd > maxfd) maxfd = (int)sessions[i].fd;
-            if (sessions[i].is_tcp && sessions[i].tcp_fd != KC_HPM_FD_INVALID) {
-                if (!kc_hpm_stream_can_send_data(&sessions[i].stream) &&
+            if (sessions[i].is_tcp && sessions[i].tcp_fd != KC_P2P_FD_INVALID) {
+                if (!kc_p2p_stream_can_send_data(&sessions[i].stream) &&
                     !sessions[i].stream.out.local_eof)
                     continue;
                 FD_SET(sessions[i].tcp_fd, &fds);
@@ -4829,45 +4829,45 @@ int kc_hpm_connect(
         tv.tv_sec = 1; tv.tv_usec = 0;
         n = select(maxfd + 1, &fds, NULL, NULL, &tv);
         if (n < 0) continue;
-        if (kc_hpm_stop_requested) break;
+        if (kc_p2p_stop_requested) break;
 
-        if (!KC_HPM_ISERR(tcp_listen_fd) && FD_ISSET(tcp_listen_fd, &fds)) {
-            kc_hpm_fd_t client_fd = accept(tcp_listen_fd, NULL, NULL);
-            if (!KC_HPM_ISERR(client_fd)) {
-                ctrl_fd = kc_hpm_tcp_connect(index_host, index_port);
-                if (!KC_HPM_ISERR(ctrl_fd)) {
-                    unsigned char sess_id_bin[KC_HPM_STREAM_SESSION_ID_SZ];
+        if (!KC_P2P_ISERR(tcp_listen_fd) && FD_ISSET(tcp_listen_fd, &fds)) {
+            kc_p2p_fd_t client_fd = accept(tcp_listen_fd, NULL, NULL);
+            if (!KC_P2P_ISERR(client_fd)) {
+                ctrl_fd = kc_p2p_tcp_connect(index_host, index_port);
+                if (!KC_P2P_ISERR(ctrl_fd)) {
+                    unsigned char sess_id_bin[KC_P2P_STREAM_SESSION_ID_SZ];
                     
-                    kc_hpm_candidate_t cands[KC_HPM_CANDIDATES_MAX];
+                    kc_p2p_candidate_t cands[KC_P2P_CANDIDATES_MAX];
                     int cand_count = 0;
-                    kc_hpm_candidate_t remote_cands[KC_HPM_CANDIDATES_MAX];
+                    kc_p2p_candidate_t remote_cands[KC_P2P_CANDIDATES_MAX];
                     int remote_cand_count = 0;
-                    char sess_id[KC_HPM_STREAM_SESSION_ID_SZ * 2 + 1];
-                    if (!kc_hpm_stream_make_session_id(sess_id_bin, sess_id)) {
-                        KC_HPM_FD_CLOSE(ctrl_fd);
-                        KC_HPM_FD_CLOSE(client_fd);
+                    char sess_id[KC_P2P_STREAM_SESSION_ID_SZ * 2 + 1];
+                    if (!kc_p2p_stream_make_session_id(sess_id_bin, sess_id)) {
+                        KC_P2P_FD_CLOSE(ctrl_fd);
+                        KC_P2P_FD_CLOSE(client_fd);
                         continue;
                     }
                     
-                    int temp_udp = kc_hpm_create_socket("0.0.0.0", 0);
-                    kc_hpm_gather_candidates(ctx, temp_udp, cands,
-                        KC_HPM_CANDIDATES_MAX, &cand_count);
+                    int temp_udp = kc_p2p_create_socket("0.0.0.0", 0);
+                    kc_p2p_gather_candidates(ctx, temp_udp, cands,
+                        KC_P2P_CANDIDATES_MAX, &cand_count);
                     
-                    kc_hpm_send_punch_req_cands(ctrl_fd, self_id, target_id, sess_id, cands, cand_count, remote_cands, &remote_cand_count);
-                    KC_HPM_FD_CLOSE(ctrl_fd);
+                    kc_p2p_send_punch_req_cands(ctrl_fd, self_id, target_id, sess_id, cands, cand_count, remote_cands, &remote_cand_count);
+                    KC_P2P_FD_CLOSE(ctrl_fd);
 
                     {
-                        kc_hpm_udp_consumer_session_t sess;
+                        kc_p2p_udp_consumer_session_t sess;
                         memset(&sess, 0, sizeof(sess));
-                        if (kc_hpm_open_udp_session_cands(
+                        if (kc_p2p_open_udp_session_cands(
                             ctx, ctx->sweep, temp_udp, self_id, target_id, sess_id,
                             remote_cands, remote_cand_count,
-                            &sess.fd, &sess.peer_addr, &sess) == KC_HPM_OK)
+                            &sess.fd, &sess.peer_addr, &sess) == KC_P2P_OK)
                         {
-                            kc_hpm_stream_init(&sess.stream, 1, sess_id_bin, sess_id);
-                            if (!kc_hpm_stream_crypto_init(&sess.stream)) {
-                                KC_HPM_FD_CLOSE(sess.fd);
-                                KC_HPM_FD_CLOSE(client_fd);
+                            kc_p2p_stream_init(&sess.stream, 1, sess_id_bin, sess_id);
+                            if (!kc_p2p_stream_crypto_init(&sess.stream)) {
+                                KC_P2P_FD_CLOSE(sess.fd);
+                                KC_P2P_FD_CLOSE(client_fd);
                                 continue;
                             }
                             sess.tcp_fd = client_fd;
@@ -4878,37 +4878,37 @@ int kc_hpm_connect(
                             memset(&sess.client_addr, 0, sizeof(sess.client_addr));
                             if (n_sessions >= cap_sessions) {
                                 int new_cap = cap_sessions == 0 ? 8 : cap_sessions * 2;
-                                kc_hpm_udp_consumer_session_t *new_sessions =
-                                    (kc_hpm_udp_consumer_session_t *)realloc(
+                                kc_p2p_udp_consumer_session_t *new_sessions =
+                                    (kc_p2p_udp_consumer_session_t *)realloc(
                                         sessions, (size_t)new_cap * sizeof(*sessions));
-                                if (!new_sessions) { KC_HPM_FD_CLOSE(sess.fd); KC_HPM_FD_CLOSE(client_fd); continue; }
+                                if (!new_sessions) { KC_P2P_FD_CLOSE(sess.fd); KC_P2P_FD_CLOSE(client_fd); continue; }
                                 sessions = new_sessions;
                                 cap_sessions = new_cap;
                             }
                             sessions[n_sessions++] = sess;
                         } else {
-                            KC_HPM_FD_CLOSE(client_fd);
+                            KC_P2P_FD_CLOSE(client_fd);
                         }
                     }
                 } else {
-                    KC_HPM_FD_CLOSE(client_fd);
+                    KC_P2P_FD_CLOSE(client_fd);
                 }
             }
         }
 
-        if (!KC_HPM_ISERR(tcp_listen_fd)) {
+        if (!KC_P2P_ISERR(tcp_listen_fd)) {
             for (i = 0; i < n_sessions; i++) {
                 if (!sessions[i].active) continue;
                 if (!FD_ISSET(sessions[i].tcp_fd, &fds)) continue;
-                if (kc_hpm_stream_pump_tcp(ctx, sessions[i].fd,
+                if (kc_p2p_stream_pump_tcp(ctx, sessions[i].fd,
                     &sessions[i].peer_addr, &sessions[i].stream,
                     sessions[i].tcp_fd) != 0)
                 {
-                    kc_hpm_consumer_session_close(&sessions[i]);
+                    kc_p2p_consumer_session_close(&sessions[i]);
                 }
             }
         } else if (FD_ISSET(local_fd, &fds)) {
-            char buf[KC_HPM_BUF];
+            char buf[KC_P2P_BUF];
             struct sockaddr_in from;
             socklen_t fromlen = sizeof(from);
             int found;
@@ -4925,43 +4925,43 @@ int kc_hpm_connect(
                     }
                 }
                 if (found < 0) {
-                    kc_hpm_udp_consumer_session_t sess;
+                    kc_p2p_udp_consumer_session_t sess;
                     memset(&sess, 0, sizeof(sess));
 
-                    ctrl_fd = kc_hpm_tcp_connect(index_host, index_port);
-                    if (!KC_HPM_ISERR(ctrl_fd)) {
-                        kc_hpm_candidate_t cands[KC_HPM_CANDIDATES_MAX];
+                    ctrl_fd = kc_p2p_tcp_connect(index_host, index_port);
+                    if (!KC_P2P_ISERR(ctrl_fd)) {
+                        kc_p2p_candidate_t cands[KC_P2P_CANDIDATES_MAX];
                         int cand_count = 0;
-                        kc_hpm_candidate_t remote_cands[KC_HPM_CANDIDATES_MAX];
+                        kc_p2p_candidate_t remote_cands[KC_P2P_CANDIDATES_MAX];
                         int remote_cand_count = 0;
                         char sess_id[32];
                         snprintf(sess_id, sizeof(sess_id), "%lx%04x",
                             (unsigned long)time(NULL), (unsigned)(rand() & 0xFFFF));
                         
-                        int temp_udp = kc_hpm_create_socket("0.0.0.0", 0);
-                        kc_hpm_gather_candidates(ctx, temp_udp, cands,
-                            KC_HPM_CANDIDATES_MAX, &cand_count);
+                        int temp_udp = kc_p2p_create_socket("0.0.0.0", 0);
+                        kc_p2p_gather_candidates(ctx, temp_udp, cands,
+                            KC_P2P_CANDIDATES_MAX, &cand_count);
                         
-                        kc_hpm_send_punch_req_cands(ctrl_fd, self_id, target_id, sess_id, cands, cand_count, remote_cands, &remote_cand_count);
-                        KC_HPM_FD_CLOSE(ctrl_fd);
+                        kc_p2p_send_punch_req_cands(ctrl_fd, self_id, target_id, sess_id, cands, cand_count, remote_cands, &remote_cand_count);
+                        KC_P2P_FD_CLOSE(ctrl_fd);
 
-                        if (kc_hpm_open_udp_session_cands(
+                        if (kc_p2p_open_udp_session_cands(
                             ctx, ctx->sweep, temp_udp, self_id, target_id, sess_id,
                             remote_cands, remote_cand_count,
-                            &sess.fd, &sess.peer_addr, &sess) == KC_HPM_OK)
+                            &sess.fd, &sess.peer_addr, &sess) == KC_P2P_OK)
                         {
                             sess.client_addr = from;
                             sess.last_rx = time(NULL);
                             sess.last_ka = sess.last_rx;
                             sess.active = 1;
                             sess.is_tcp = 0;
-                            sess.tcp_fd = KC_HPM_FD_INVALID;
+                            sess.tcp_fd = KC_P2P_FD_INVALID;
                             if (n_sessions >= cap_sessions) {
                                 int new_cap = cap_sessions == 0 ? 8 : cap_sessions * 2;
-                                kc_hpm_udp_consumer_session_t *new_sessions =
-                                    (kc_hpm_udp_consumer_session_t *)realloc(
+                                kc_p2p_udp_consumer_session_t *new_sessions =
+                                    (kc_p2p_udp_consumer_session_t *)realloc(
                                         sessions, (size_t)new_cap * sizeof(*sessions));
-                                if (!new_sessions) { KC_HPM_FD_CLOSE(sess.fd); goto udp_skip; }
+                                if (!new_sessions) { KC_P2P_FD_CLOSE(sess.fd); goto udp_skip; }
                                 sessions = new_sessions; cap_sessions = new_cap;
                             }
                             sessions[n_sessions++] = sess;
@@ -4982,26 +4982,26 @@ udp_skip:
         for (i = 0; i < n_sessions; i++) {
             if (!sessions[i].active) continue;
             if (!FD_ISSET(sessions[i].fd, &fds)) continue;
-            char buf[KC_HPM_BUF];
+            char buf[KC_P2P_BUF];
             struct sockaddr_in from;
             socklen_t fromlen = sizeof(from);
             n = (int)recvfrom(sessions[i].fd, buf, sizeof(buf), 0,
                 (struct sockaddr *)&from, &fromlen);
             if (n > 0) {
-                if ((n >= 7 && strncmp(buf, "HPM_KA:", 7) == 0) ||
-                    (n >= 10 && strncmp(buf, "HPM_PUNCH:", 10) == 0) ||
+                if ((n >= 7 && strncmp(buf, "P2P_KA:", 7) == 0) ||
+                    (n >= 10 && strncmp(buf, "P2P_PUNCH:", 10) == 0) ||
                     (n >= 11 && strncmp(buf, "PUNCH_PING:", 11) == 0) ||
                     (n >= 11 && strncmp(buf, "PUNCH_PONG:", 11) == 0)) {
                     sessions[i].last_rx = time(NULL);
                 } else {
                     if (sessions[i].is_tcp) {
-                        if (sessions[i].tcp_fd != KC_HPM_FD_INVALID &&
-                            kc_hpm_stream_process_packet(ctx, sessions[i].fd,
+                        if (sessions[i].tcp_fd != KC_P2P_FD_INVALID &&
+                            kc_p2p_stream_process_packet(ctx, sessions[i].fd,
                                 &sessions[i].peer_addr,
                                 &sessions[i].stream, sessions[i].tcp_fd,
                                 (const unsigned char *)buf, (size_t)n) != 0)
                         {
-                            kc_hpm_consumer_session_close(&sessions[i]);
+                            kc_p2p_consumer_session_close(&sessions[i]);
                         }
                     } else {
                         sendto(local_fd, buf, (size_t)n, 0,
@@ -5016,36 +5016,36 @@ udp_skip:
         for (i = 0; i < n_sessions; i++) {
             if (!sessions[i].active) continue;
             if (sessions[i].is_tcp) {
-                if (kc_hpm_stream_tick(ctx, sessions[i].fd,
+                if (kc_p2p_stream_tick(ctx, sessions[i].fd,
                     &sessions[i].peer_addr, &sessions[i].stream) != 0)
                 {
-                    kc_hpm_consumer_session_close(&sessions[i]);
+                    kc_p2p_consumer_session_close(&sessions[i]);
                     continue;
                 }
-                if (kc_hpm_stream_is_done(&sessions[i].stream)) {
-                    kc_hpm_consumer_session_close(&sessions[i]);
+                if (kc_p2p_stream_is_done(&sessions[i].stream)) {
+                    kc_p2p_consumer_session_close(&sessions[i]);
                     continue;
                 }
             }
-            if (time(NULL) - sessions[i].last_ka > KC_HPM_KEEPALIVE_S) {
-                sendto(sessions[i].fd, "HPM_KA:", 7, 0,
+            if (time(NULL) - sessions[i].last_ka > KC_P2P_KEEPALIVE_S) {
+                sendto(sessions[i].fd, "P2P_KA:", 7, 0,
                     (const struct sockaddr *)&sessions[i].peer_addr,
                     sizeof(sessions[i].peer_addr));
                 sessions[i].last_ka = time(NULL);
             }
-            if (time(NULL) - sessions[i].last_rx > KC_HPM_DISCONNECT_S) {
-                kc_hpm_consumer_session_close(&sessions[i]);
+            if (time(NULL) - sessions[i].last_rx > KC_P2P_DISCONNECT_S) {
+                kc_p2p_consumer_session_close(&sessions[i]);
             }
         }
     }
 
     for (int cleanup_i = 0; cleanup_i < n_sessions; cleanup_i++) {
         if (!sessions[cleanup_i].active) continue;
-        kc_hpm_consumer_session_close(&sessions[cleanup_i]);
+        kc_p2p_consumer_session_close(&sessions[cleanup_i]);
     }
     free(sessions);
-    KC_HPM_FD_CLOSE(local_fd);
-    if (!KC_HPM_ISERR(tcp_listen_fd)) KC_HPM_FD_CLOSE(tcp_listen_fd);
-    kc_hpm_platform_cleanup();
-    return KC_HPM_OK;
+    KC_P2P_FD_CLOSE(local_fd);
+    if (!KC_P2P_ISERR(tcp_listen_fd)) KC_P2P_FD_CLOSE(tcp_listen_fd);
+    kc_p2p_platform_cleanup();
+    return KC_P2P_OK;
 }

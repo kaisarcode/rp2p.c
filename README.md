@@ -1,6 +1,6 @@
-# hpm.c - HolePunchMan: General P2P communication
+# p2p.c - KaisarCode P2P: General P2P communication
 
-`hpm.c` is a small and portable C library and CLI for exposing local TCP or UDP services over peer-to-peer connections.
+`p2p.c` is a small and portable C library and CLI for exposing local TCP or UDP services over peer-to-peer connections.
 
 ---
 
@@ -11,42 +11,42 @@
 Start an index server on port 9876:
 
 ```bash
-hpm idx 9876
+p2p idx 9876
 ```
 
 Start a public index with registration cost:
 
 ```bash
-hpm idx 9876 --pow 20
+p2p idx 9876 --pow 20
 ```
 
 Start a publisher-protected index:
 
 ```bash
-HPM_PASS='password' hpm idx 9876
+P2P_PASS='password' p2p idx 9876
 ```
 
 Start a publisher-protected index with registration cost:
 
 ```bash
-HPM_PASS='password' hpm idx 9876 --pow 20
+P2P_PASS='password' p2p idx 9876 --pow 20
 ```
 
 Start an index with reserved seats that override the global password:
 
 ```bash
-HPM_PASS='global' \
-HPM_VIP='web webpass
+P2P_PASS='global' \
+P2P_VIP='web webpass
 admin adminpass' \
-hpm idx 9876
+p2p idx 9876
 ```
 
 Load the same VIP seat map from a text file:
 
 ```bash
-HPM_PASS='global' \
-HPM_VIP="$(cat ./vip.txt)" \
-hpm idx 9876
+P2P_PASS='global' \
+P2P_VIP="$(cat ./vip.txt)" \
+p2p idx 9876
 ```
 
 With `vip.txt` containing whitespace-separated `<id> <pass>` pairs:
@@ -61,32 +61,32 @@ game gamepass
 Publish a local TCP service on `127.0.0.1:8080`:
 
 ```bash
-hpm set web@idx.example.com:9876 --tcp 8080
+p2p set web@idx.example.com:9876 --tcp 8080
 ```
 
 Publish with optional STUN discovery enabled on the publisher side:
 
 ```bash
-hpm set web@idx.example.com:9876 --tcp 8080 \
+p2p set web@idx.example.com:9876 --tcp 8080 \
   --stun stun:stun.cloudflare.com:3478
 ```
 
 Publish to a protected index:
 
 ```bash
-HPM_PASS='password' hpm set web@idx.example.com:9876 --tcp 8080
+P2P_PASS='password' p2p set web@idx.example.com:9876 --tcp 8080
 ```
 
 Expose that remote TCP service locally on `127.0.0.1:9000`:
 
 ```bash
-hpm con web@idx.example.com:9876 --tcp 9000
+p2p con web@idx.example.com:9876 --tcp 9000
 ```
 
 Expose it locally with STUN enabled on the consumer side:
 
 ```bash
-hpm con web@idx.example.com:9876 --tcp 9000 \
+p2p con web@idx.example.com:9876 --tcp 9000 \
   --stun stun:stun.cloudflare.com:3478
 ```
 
@@ -99,23 +99,23 @@ printf 'ping' | socat - TCP:127.0.0.1:9000
 Remove one announced host from the index:
 
 ```bash
-hpm del web@idx.example.com:9876
+p2p del web@idx.example.com:9876
 ```
 
 UDP services are exposed the same way:
 
 ```bash
-hpm set game@idx.example.com:9876 --udp 7777
-hpm con game@idx.example.com:9876 --udp 9000
+p2p set game@idx.example.com:9876 --udp 7777
+p2p con game@idx.example.com:9876 --udp 9000
 ```
 
 UDP services can use STUN on either side too:
 
 ```bash
-hpm set game@idx.example.com:9876 --udp 7777 \
+p2p set game@idx.example.com:9876 --udp 7777 \
   --stun stun:stun.cloudflare.com:3478
 
-hpm con game@idx.example.com:9876 --udp 9000 \
+p2p con game@idx.example.com:9876 --udp 9000 \
   --stun stun:stun.l.google.com:19302
 ```
 
@@ -124,10 +124,10 @@ Once connected, the remote service can be used like any local TCP port:
 ```bash
 # Terminal 1 (publisher side)
 socat TCP-LISTEN:8080,reuseaddr,fork EXEC:cat &
-hpm set web@idx.example.com:9876 --tcp 8080
+p2p set web@idx.example.com:9876 --tcp 8080
 
 # Terminal 2 (consumer side)
-hpm con web@idx.example.com:9876 --tcp 9000
+p2p con web@idx.example.com:9876 --tcp 9000
 printf 'ping' | socat - TCP:127.0.0.1:9000
 ```
 
@@ -154,13 +154,13 @@ printf 'ping' | socat - TCP:127.0.0.1:9000
 
 The part before `@` (e.g. `web`, `game`) is an arbitrary label you choose to identify your service in the index.
 It is **not** a system username, and the index does **not** create user accounts or store credentials, it is simply a key in a plain lookup table.
-If nobody has announced `game`, then `hpm con game@idx.example.com:9876` fails with `NOT_FOUND`.
+If nobody has announced `game`, then `p2p con game@idx.example.com:9876` fails with `NOT_FOUND`.
 The form `game@idx.example.com` is **not** a URL; you cannot open it in a browser, ping it, or connect to it directly.
-It only has meaning inside hpm commands to refer to a registered host on a specific index.
+It only has meaning inside p2p commands to refer to a registered host on a specific index.
 
-IDs may contain only ASCII letters and digits (`A-Z`, `a-z`, `0-9`). Password tokens used by `HPM_PASS` and `HPM_VIP` are restricted to terminal-safe bytes: letters, digits, and `._-+=,:@%/`.
+IDs may contain only ASCII letters and digits (`A-Z`, `a-z`, `0-9`). Password tokens used by `P2P_PASS` and `P2P_VIP` are restricted to terminal-safe bytes: letters, digits, and `._-+=,:@%/`.
 
-`HPM_VIP` is parsed as whitespace-separated `<id> <pass>` pairs, so spaces, tabs, newlines, and blank lines are all treated the same after trimming the full string.
+`P2P_VIP` is parsed as whitespace-separated `<id> <pass>` pairs, so spaces, tabs, newlines, and blank lines are all treated the same after trimming the full string.
 
 ### How the tunnel works
 
@@ -170,17 +170,17 @@ It does **not** bind UDP, perform NAT discovery, relay UDP, or carry application
 
 The inter-peer data channel is **UDP-based**.
 By default it tries direct UDP hole punching first.
-In `--tcp` mode, HPM wraps that UDP path in an internal encrypted reliable stream so local TCP applications still see ordered, reconstructable, full-duplex byte semantics.
+In `--tcp` mode, P2P wraps that UDP path in an internal encrypted reliable stream so local TCP applications still see ordered, reconstructable, full-duplex byte semantics.
 Each TCP client session performs a fresh ephemeral key exchange with the remote peer before application data flows, and those session keys are discarded when the session ends.
 The `--tcp` and `--udp` flags control how data enters and leaves the tunnel on each end:
 
 | Flag | Publisher side | Consumer side |
 | :--- | :--- | :--- |
-| `--tcp` | Connects to local TCP service → chunks into HPM encrypted reliable stream frames → sends through UDP hole-punch tunnel | Receives HPM encrypted reliable stream frames → reconstructs ordered byte stream → writes to local TCP client |
+| `--tcp` | Connects to local TCP service → chunks into P2P encrypted reliable stream frames → sends through UDP hole-punch tunnel | Receives P2P encrypted reliable stream frames → reconstructs ordered byte stream → writes to local TCP client |
 | `--udp` | Receives from local UDP service → forwards directly through hole-punch tunnel | Receives from hole-punch tunnel → forwards directly to local UDP client |
 
-`hpm con` creates a local TCP or UDP listener on `127.0.0.1:<listen_port>`. This listener acts as a transparent bridge to the remote service.
-You never connect directly to the remote machine; every connection or datagram goes to `127.0.0.1:<listen_port>`, and hpm forwards it through
+`p2p con` creates a local TCP or UDP listener on `127.0.0.1:<listen_port>`. This listener acts as a transparent bridge to the remote service.
+You never connect directly to the remote machine; every connection or datagram goes to `127.0.0.1:<listen_port>`, and p2p forwards it through
 the UDP transport path to the publisher's backend. From your perspective, the remote service behaves exactly like a local process on that port.
 Any tool that speaks TCP or UDP works against the bridge without modification.
 
@@ -192,53 +192,53 @@ direct address and port to try for hole punching.
 STUN is performed by publishers and consumers against external STUN servers.
 The index is not a STUN server and does not observe or validate peer UDP endpoints.
 
-HPM does not support TURN-style fallback. TURN relays application traffic through
+P2P does not support TURN-style fallback. TURN relays application traffic through
 a third party, which changes the model from direct peer-to-peer transport to
-server-mediated transport. HPM is designed to preserve direct P2P data paths, so
+server-mediated transport. P2P is designed to preserve direct P2P data paths, so
 on restrictive NATs where direct connectivity cannot be established, some
 sessions may fail instead of degrading to a relay.
 
 ## Public API
 
 ```c
-#include "hpm.h"
+#include "p2p.h"
 
-kc_hpm_t *ctx;
-kc_hpm_open(&ctx);
+kc_p2p_t *ctx;
+kc_p2p_open(&ctx);
 
-kc_hpm_set_pow(ctx, 0);
-kc_hpm_set_pass(ctx, "password");
+kc_p2p_set_pow(ctx, 0);
+kc_p2p_set_pass(ctx, "password");
 
-kc_hpm_serve_index(ctx, "0.0.0.0", 9876);
+kc_p2p_serve_index(ctx, "0.0.0.0", 9876);
 
-kc_hpm_close(ctx);
+kc_p2p_close(ctx);
 ```
 
 ---
 
 ## Lifecycle
 
-- `kc_hpm_open()` - allocates and returns a new context owned by the caller.
-- `kc_hpm_options_default()` - returns a default options struct for env-backed CLI/runtime configuration.
-- `kc_hpm_options_load_env()` - loads `HPM_*` environment values into an options struct.
-- `kc_hpm_serve_index()` - starts the index server. Blocking, never returns on success.
-- `kc_hpm_deregister()` - removes one host from an index using the stored key.
-- `kc_hpm_connect()` - opens a local TCP listener or UDP bridge and creates one peer session per accepted local client or datagram source.
-- `kc_hpm_wait()` - registers one host, waits for incoming punch requests, and bridges each session to one local TCP backend or UDP socket.
-- `kc_hpm_set_pow()` - configures the `REGISTER` proof difficulty.
-- `kc_hpm_set_pass()` - configures the shared password used to derive `REGISTER` proofs.
-- `kc_hpm_set_port()` - sets the local service or bridge port used by `set`/`con`.
-- `kc_hpm_set_protocol()` - selects TCP or UDP mode before `kc_hpm_wait()` or `kc_hpm_connect()`.
-- `kc_hpm_set_sweep()` - sets the UDP port sweep range used during punch fallback.
-- `kc_hpm_set_stun_url()` - enables optional STUN discovery for `srflx` candidates.
-- `kc_hpm_close()` - releases the context.
+- `kc_p2p_open()` - allocates and returns a new context owned by the caller.
+- `kc_p2p_options_default()` - returns a default options struct for env-backed CLI/runtime configuration.
+- `kc_p2p_options_load_env()` - loads `P2P_*` environment values into an options struct.
+- `kc_p2p_serve_index()` - starts the index server. Blocking, never returns on success.
+- `kc_p2p_deregister()` - removes one host from an index using the stored key.
+- `kc_p2p_connect()` - opens a local TCP listener or UDP bridge and creates one peer session per accepted local client or datagram source.
+- `kc_p2p_wait()` - registers one host, waits for incoming punch requests, and bridges each session to one local TCP backend or UDP socket.
+- `kc_p2p_set_pow()` - configures the `REGISTER` proof difficulty.
+- `kc_p2p_set_pass()` - configures the shared password used to derive `REGISTER` proofs.
+- `kc_p2p_set_port()` - sets the local service or bridge port used by `set`/`con`.
+- `kc_p2p_set_protocol()` - selects TCP or UDP mode before `kc_p2p_wait()` or `kc_p2p_connect()`.
+- `kc_p2p_set_sweep()` - sets the UDP port sweep range used during punch fallback.
+- `kc_p2p_set_stun_url()` - enables optional STUN discovery for `srflx` candidates.
+- `kc_p2p_close()` - releases the context.
 
 ---
 
 ## Wire Protocol
 
 Index control messages are plain text over TCP. The inter-peer data channel is UDP-based regardless of the `--tcp`/`--udp` flag.
-UDP is used only between peers for hole-punch probes, keepalives, and direct payload transport. In `--tcp` mode, application bytes are carried inside HPM's own encrypted reliable stream frames over that UDP path.
+UDP is used only between peers for hole-punch probes, keepalives, and direct payload transport. In `--tcp` mode, application bytes are carried inside P2P's own encrypted reliable stream frames over that UDP path.
 
 | Request | Response |
 | :--- | :--- |
@@ -251,7 +251,7 @@ UDP is used only between peers for hole-punch probes, keepalives, and direct pay
 | forwarded by index | `PUNCH_CALL2:me:session\nCAND:...\nEND` to target |
 | `PUNCH_PING:...` | Direct peer STUN-like probe (UDP) |
 | `PUNCH_PONG:...` | Direct peer STUN-like reply (UDP) |
-| `HPM_KA:` | UDP keepalive over direct path |
+| `P2P_KA:` | UDP keepalive over direct path |
 
 ### TCP Stream Layer
 
@@ -262,7 +262,7 @@ In `--tcp` mode only, peers run an internal session protocol over the selected U
 - Peers exchange ephemeral public keys before application data flows.
 - Session keys are derived per direction and discarded when the session closes.
 - DATA frames are encrypted and authenticated.
-- Ordering, retransmission, duplicate suppression, and stream reconstruction happen inside HPM.
+- Ordering, retransmission, duplicate suppression, and stream reconstruction happen inside P2P.
 - `--udp` mode does not use this layer and keeps plain datagram semantics.
 
 Internal TCP stream frame types:
@@ -284,12 +284,12 @@ The deregistration key is generated by the index automatically and stored locall
 
 ## Proof-of-Work
 
-By default, the index is a lightweight public rendezvous server with no authentication. When HPM_PASS is set, REGISTER requires a password-derived proof.
+By default, the index is a lightweight public rendezvous server with no authentication. When P2P_PASS is set, REGISTER requires a password-derived proof.
 Anyone can send REGISTER and occupy a seat. PoW prevents casual or scripted abuse by requiring a computational cost per registration.
 It does not stop a determined attacker (e.g. a botnet), but it raises the cost of filling the peer table from near-zero to hours of CPU time.
 
 Each new publisher registration receives a random 8-byte nonce and must answer a challenge using a proof derived from `nonce_hex || self_id || solution_hex`.
-The proof is always HMAC-SHA256 keyed by `HPM_PASS`. On a public index, `HPM_PASS` is the empty string. Heartbeats from already-registered peers skip the challenge.
+The proof is always HMAC-SHA256 keyed by `P2P_PASS`. On a public index, `P2P_PASS` is the empty string. Heartbeats from already-registered peers skip the challenge.
 
 ### Wire
 
@@ -303,51 +303,51 @@ I -> C: OK:KEY:<hex>
 ### CLI
 
 ```bash
-hpm idx 9876                      # PoW 0 bits (default)
-hpm idx 9876 --pow 20             # PoW 20 bits
-HPM_PASS='password' hpm idx 9876
-HPM_PASS='password' hpm idx 9876 --pow 20
-HPM_PASS='global' HPM_VIP='web webpass admin adminpass' hpm idx 9876
+p2p idx 9876                      # PoW 0 bits (default)
+p2p idx 9876 --pow 20             # PoW 20 bits
+P2P_PASS='password' p2p idx 9876
+P2P_PASS='password' p2p idx 9876 --pow 20
+P2P_PASS='global' P2P_VIP='web webpass admin adminpass' p2p idx 9876
 ```
 
 ### Environment
 
 | Variable | Description |
 | :--- | :--- |
-| `HPM_POW=0` | PoW bits for index registration (overridden by `--pow` flag). |
-| `HPM_PASS=password` | Optional shared password used to protect server registration. |
-| `HPM_VIP='id pass id pass ...'` | Reserved seat passwords parsed as whitespace-separated `<id> <pass>` pairs. |
-| `HPM_SWEEP=32` | UDP port sweep range used during punch fallback. |
-| `HPM_STUN=stun:host:port` | Optional STUN server used to discover `srflx` automatically. |
-| `HPM_SEATS=1024` | Max announced peers on the index server (overridden by `--max`). |
+| `P2P_POW=0` | PoW bits for index registration (overridden by `--pow` flag). |
+| `P2P_PASS=password` | Optional shared password used to protect server registration. |
+| `P2P_VIP='id pass id pass ...'` | Reserved seat passwords parsed as whitespace-separated `<id> <pass>` pairs. |
+| `P2P_SWEEP=32` | UDP port sweep range used during punch fallback. |
+| `P2P_STUN=stun:host:port` | Optional STUN server used to discover `srflx` automatically. |
+| `P2P_SEATS=1024` | Max announced peers on the index server (overridden by `--max`). |
 
 Internal debug-only environment knobs used for fault-injection tests:
 
-- `HPM_DEBUG_STREAM=1` enables detailed stream logs.
-- `HPM_DEBUG_STREAM_DROP_EVERY=N` drops every Nth TCP stream DATA frame once.
-- `HPM_DEBUG_STREAM_REORDER_EVERY=N` delays every Nth TCP stream DATA frame once so the next frame arrives first.
+- `P2P_DEBUG_STREAM=1` enables detailed stream logs.
+- `P2P_DEBUG_STREAM_DROP_EVERY=N` drops every Nth TCP stream DATA frame once.
+- `P2P_DEBUG_STREAM_REORDER_EVERY=N` delays every Nth TCP stream DATA frame once so the next frame arrives first.
 
-`HPM_INDEX` and `HPM_BIND` are parsed by the options loader internally, but the current CLI still requires explicit positional arguments for the index address and explicit command flags for bind behavior.
+`P2P_INDEX` and `P2P_BIND` are parsed by the options loader internally, but the current CLI still requires explicit positional arguments for the index address and explicit command flags for bind behavior.
 
-When `HPM_VIP` defines a password for one seat, that seat must use its VIP password and no longer accepts the global `HPM_PASS`. VIP seats are reserved at index startup and keep their place even while offline.
-Seats not listed in `HPM_VIP` still use the global `HPM_PASS`, but they may only occupy the non-VIP capacity left after VIP reservations.
-The effective non-VIP capacity is `max(0, --max - vip_count)`. `HPM_VIP` may define more IDs than `--max`; in that case no non-VIP seats remain, but the listed VIP IDs may still register with their own passwords.
-If `HPM_VIP` repeats an ID or contains an invalid ID/password token, `hpm idx` fails at startup.
+When `P2P_VIP` defines a password for one seat, that seat must use its VIP password and no longer accepts the global `P2P_PASS`. VIP seats are reserved at index startup and keep their place even while offline.
+Seats not listed in `P2P_VIP` still use the global `P2P_PASS`, but they may only occupy the non-VIP capacity left after VIP reservations.
+The effective non-VIP capacity is `max(0, --max - vip_count)`. `P2P_VIP` may define more IDs than `--max`; in that case no non-VIP seats remain, but the listed VIP IDs may still register with their own passwords.
+If `P2P_VIP` repeats an ID or contains an invalid ID/password token, `p2p idx` fails at startup.
 
 Examples:
 
 ```bash
-HPM_PASS='global' HPM_VIP='web webpass' hpm idx 9876
+P2P_PASS='global' P2P_VIP='web webpass' p2p idx 9876
 
-HPM_PASS='webpass' hpm set web@idx.example.com:9876 --tcp 8080
-HPM_PASS='global' hpm set blog@idx.example.com:9876 --tcp 8080
+P2P_PASS='webpass' p2p set web@idx.example.com:9876 --tcp 8080
+P2P_PASS='global' p2p set blog@idx.example.com:9876 --tcp 8080
 ```
 
 ### API
 
 ```c
-kc_hpm_set_pow(ctx, 0);
-kc_hpm_set_pass(ctx, "password");
+kc_p2p_set_pow(ctx, 0);
+kc_p2p_set_pass(ctx, "password");
 ```
 
 ### Cost reference
@@ -361,7 +361,7 @@ kc_hpm_set_pass(ctx, "password");
 | 28 | 268M | ~50s | ~8min | ~1h |
 | 32 | 4G | ~15min | ~2h | ~24h |
 
-`HPM_PASS` only controls who may register services in the index. It does not authenticate consumers, encrypt tunnel traffic, or replace application-level authentication.
+`P2P_PASS` only controls who may register services in the index. It does not authenticate consumers, encrypt tunnel traffic, or replace application-level authentication.
 
 ---
 
@@ -371,14 +371,14 @@ kc_hpm_set_pass(ctx, "password");
 - The index does not require a public UDP port.
 - The index does not relay application traffic.
 - The inter-peer transport is UDP-based and stays peer-to-peer.
-- `--tcp` now uses an internal encrypted reliable stream over UDP. Local service still communicates over TCP, but HPM handles ordering, retransmission, reconstruction, and payload encryption inside the tunnel.
+- `--tcp` now uses an internal encrypted reliable stream over UDP. Local service still communicates over TCP, but P2P handles ordering, retransmission, reconstruction, and payload encryption inside the tunnel.
 - `set --tcp <port>` connects to a real local TCP backend on `127.0.0.1:<port>`.
 - `con --tcp <port>` exposes a local TCP listener on `127.0.0.1:<port>`.
 - Each accepted local TCP client creates a separate peer session.
 - The publisher can serve multiple consumers concurrently.
 - `--udp` mode forwards UDP datagrams directly through the tunnel with no protocol conversion, ordering, or retransmission.
 - `--stun` is opt-in and used only for endpoint discovery. It does not carry application payloads.
-- HPM does not implement TURN or relay application traffic through the index or other third-party servers.
+- P2P does not implement TURN or relay application traffic through the index or other third-party servers.
 - On restrictive NATs where direct UDP connectivity cannot be established, some sessions may fail by design rather than fall back to relayed transport.
 
 ---

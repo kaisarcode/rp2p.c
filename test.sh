@@ -1,15 +1,15 @@
 #!/bin/sh
 # test.sh
-# Summary: Validation suite for hpm TCP publish and consume mode.
+# Summary: Validation suite for p2p TCP publish and consume mode.
 # Author:  KaisarCode
 # Website: https://kaisarcode.com
 # License: https://www.gnu.org/licenses/gpl-3.0.html
 
-BIN=bin/x86_64/linux/hpm
+BIN=bin/x86_64/linux/p2p
 PASS=0
 FAIL=0
 status=0
-TMP_ROOT=/tmp/hpm-test-$$
+TMP_ROOT=/tmp/p2p-test-$$
 PORT_BASE=$((20000 + $$ % 20000))
 IPID=
 HPID=
@@ -36,9 +36,9 @@ kc_test_pass() {
 # Verifies build artifacts exist.
 # @return 0 on success, 1 on failure.
 kc_test_binary() {
-    if [ ! -x "$BIN" ]; then kc_test_fail "hpm not found: $BIN"; return 1; fi
-    if [ ! -f "bin/x86_64/linux/libhpm.a" ]; then kc_test_fail "libhpm.a not found"; return 1; fi
-    if [ ! -f "bin/x86_64/linux/libhpm.so" ]; then kc_test_fail "libhpm.so not found"; return 1; fi
+    if [ ! -x "$BIN" ]; then kc_test_fail "p2p not found: $BIN"; return 1; fi
+    if [ ! -f "bin/x86_64/linux/libkcp2p.a" ]; then kc_test_fail "libkcp2p.a not found"; return 1; fi
+    if [ ! -f "bin/x86_64/linux/libkcp2p.so" ]; then kc_test_fail "libkcp2p.so not found"; return 1; fi
     kc_test_pass "binaries"; return 0
 }
 
@@ -53,7 +53,7 @@ kc_test_cli() {
     if "$BIN" del 'bad:id@127.0.0.1:1' > /dev/null 2>&1; then kc_test_fail "cli: invalid del id should fail"; return 1; fi
     if "$BIN" set 'bad-id@127.0.0.1:1' --tcp 1 > /dev/null 2>&1; then kc_test_fail "cli: non-alnum set id should fail"; return 1; fi
     if "$BIN" con 'bad_id@127.0.0.1:1' --tcp 1 > /dev/null 2>&1; then kc_test_fail "cli: non-alnum con id should fail"; return 1; fi
-    if HPM_PASS='bad`tick' "$BIN" set foo@127.0.0.1:1 --tcp 1 > /dev/null 2>&1; then kc_test_fail "cli: invalid HPM_PASS should fail"; return 1; fi
+    if P2P_PASS='bad`tick' "$BIN" set foo@127.0.0.1:1 --tcp 1 > /dev/null 2>&1; then kc_test_fail "cli: invalid P2P_PASS should fail"; return 1; fi
     kc_test_pass "cli"; return 0
 }
 
@@ -62,7 +62,7 @@ kc_test_cli() {
 # @param $2 PoW bits.
 # @param $3 Shared password.
 # @param $4 Test label.
-# @param $5 Optional HPM_VIP text.
+# @param $5 Optional P2P_VIP text.
 # @return 0 on success, 1 on failure.
 kc_test_index_start() {
     port=$1
@@ -71,11 +71,11 @@ kc_test_index_start() {
     label=$4
     vip_text=$5
     if [ -n "$pass_key" ] && [ -n "$vip_text" ]; then
-        HPM_PASS="$pass_key" HPM_VIP="$vip_text" "$BIN" idx "$port" --pow "$pow_bits" > "$TMP_ROOT/idx.log" 2>&1 &
+        P2P_PASS="$pass_key" P2P_VIP="$vip_text" "$BIN" idx "$port" --pow "$pow_bits" > "$TMP_ROOT/idx.log" 2>&1 &
     elif [ -n "$pass_key" ]; then
-        HPM_PASS="$pass_key" "$BIN" idx "$port" --pow "$pow_bits" > "$TMP_ROOT/idx.log" 2>&1 &
+        P2P_PASS="$pass_key" "$BIN" idx "$port" --pow "$pow_bits" > "$TMP_ROOT/idx.log" 2>&1 &
     elif [ -n "$vip_text" ]; then
-        HPM_VIP="$vip_text" "$BIN" idx "$port" --pow "$pow_bits" > "$TMP_ROOT/idx.log" 2>&1 &
+        P2P_VIP="$vip_text" "$BIN" idx "$port" --pow "$pow_bits" > "$TMP_ROOT/idx.log" 2>&1 &
     else
         "$BIN" idx "$port" --pow "$pow_bits" > "$TMP_ROOT/idx.log" 2>&1 &
     fi
@@ -117,7 +117,7 @@ kc_test_vip_register() {
 
     kc_test_index_start "$vip_port_bad" 0 global vip-wrong-pass "$vip_text" || return 1
     kc_test_tcp_start "$vip_backend_bad" || return 1
-    HPM_PASS=global "$BIN" set vipseat@127.0.0.1:"$vip_port_bad" --tcp "$vip_backend_bad" > "$TMP_ROOT/vip-bad.log" 2>&1 &
+    P2P_PASS=global "$BIN" set vipseat@127.0.0.1:"$vip_port_bad" --tcp "$vip_backend_bad" > "$TMP_ROOT/vip-bad.log" 2>&1 &
     spid=$!
     sleep 2
     if kill -0 "$spid" 2>/dev/null; then
@@ -136,25 +136,25 @@ kc_test_vip_register() {
     kc_test_set_tcp "$vip_port_global" plainseat "$vip_backend_global" global || return 1
     kc_test_index_stop
 
-    if HPM_PASS=global HPM_VIP='vipseat' "$BIN" idx "$vip_port_odd" > "$TMP_ROOT/vip-odd.log" 2>&1; then
+    if P2P_PASS=global P2P_VIP='vipseat' "$BIN" idx "$vip_port_odd" > "$TMP_ROOT/vip-odd.log" 2>&1; then
         kc_test_fail "vip-odd"
         return 1
     fi
     kc_test_pass "vip-odd"
 
-    if HPM_PASS=global HPM_VIP='vipseat one vipseat two' "$BIN" idx "$vip_port_dup" > "$TMP_ROOT/vip-dup.log" 2>&1; then
+    if P2P_PASS=global P2P_VIP='vipseat one vipseat two' "$BIN" idx "$vip_port_dup" > "$TMP_ROOT/vip-dup.log" 2>&1; then
         kc_test_fail "vip-dup"
         return 1
     fi
     kc_test_pass "vip-dup"
 
-    if HPM_PASS=global HPM_VIP='bad:id nope' "$BIN" idx "$vip_port_invalid" > "$TMP_ROOT/vip-invalid.log" 2>&1; then
+    if P2P_PASS=global P2P_VIP='bad:id nope' "$BIN" idx "$vip_port_invalid" > "$TMP_ROOT/vip-invalid.log" 2>&1; then
         kc_test_fail "vip-invalid-id"
         return 1
     fi
     kc_test_pass "vip-invalid-id"
 
-    if HPM_PASS=global HPM_VIP='vipseat bad`tick' "$BIN" idx "$vip_port_invalid" > "$TMP_ROOT/vip-invalid-pass.log" 2>&1; then
+    if P2P_PASS=global P2P_VIP='vipseat bad`tick' "$BIN" idx "$vip_port_invalid" > "$TMP_ROOT/vip-invalid-pass.log" 2>&1; then
         kc_test_fail "vip-invalid-pass"
         return 1
     fi
@@ -182,7 +182,7 @@ kc_test_vip_seat_reserve() {
     over_backend_1=$6
     over_backend_2=$7
 
-    HPM_VIP='vip vip-pass' "$BIN" idx "$full_port" --max 1 --pow 0 > "$TMP_ROOT/vip-seat-full-idx.log" 2>&1 &
+    P2P_VIP='vip vip-pass' "$BIN" idx "$full_port" --max 1 --pow 0 > "$TMP_ROOT/vip-seat-full-idx.log" 2>&1 &
     IPID=$!
     sleep 1
     if ! kill -0 "$IPID" 2>/dev/null; then kc_test_fail "vip-seat-full-index"; return 1; fi
@@ -203,14 +203,14 @@ kc_test_vip_seat_reserve() {
     kc_test_index_stop
     kc_test_pass "vip-seat-reserved"
 
-    HPM_VIP='vip vip-pass' "$BIN" idx "$open_port" --max 2 --pow 0 > "$TMP_ROOT/vip-seat-open-idx.log" 2>&1 &
+    P2P_VIP='vip vip-pass' "$BIN" idx "$open_port" --max 2 --pow 0 > "$TMP_ROOT/vip-seat-open-idx.log" 2>&1 &
     IPID=$!
     sleep 1
     if ! kill -0 "$IPID" 2>/dev/null; then kc_test_fail "vip-seat-open-index"; return 1; fi
     kc_test_set_tcp "$open_port" test "$open_backend" "" || return 1
     kc_test_index_stop
 
-    HPM_VIP='vip1 pass1 vip2 pass2' "$BIN" idx "$over_port" --max 1 --pow 0 > "$TMP_ROOT/vip-seat-over-idx.log" 2>&1 &
+    P2P_VIP='vip1 pass1 vip2 pass2' "$BIN" idx "$over_port" --max 1 --pow 0 > "$TMP_ROOT/vip-seat-over-idx.log" 2>&1 &
     IPID=$!
     sleep 1
     if ! kill -0 "$IPID" 2>/dev/null; then kc_test_fail "vip-seat-over-index"; return 1; fi
@@ -389,7 +389,7 @@ kc_test_set_tcp() {
     pass_key=$4
     kc_test_tcp_start "$backend_port" || return 1
     if [ -n "$pass_key" ]; then
-        HPM_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/set-$host.log" 2>&1 &
+        P2P_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/set-$host.log" 2>&1 &
     else
         "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/set-$host.log" 2>&1 &
     fi
@@ -422,7 +422,7 @@ kc_test_tcp_echo() {
 
     kc_test_tcp_start "$backend_port" || return 1
     if [ -n "$pass_key" ]; then
-        HPM_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/tcp-set.log" 2>&1 &
+        P2P_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/tcp-set.log" 2>&1 &
     else
         "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/tcp-set.log" 2>&1 &
     fi
@@ -466,7 +466,7 @@ kc_test_tcp_reconnect() {
 
     kc_test_tcp_start "$backend_port" || return 1
     if [ -n "$pass_key" ]; then
-        HPM_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/reconnect-set.log" 2>&1 &
+        P2P_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/reconnect-set.log" 2>&1 &
     else
         "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/reconnect-set.log" 2>&1 &
     fi
@@ -516,7 +516,7 @@ kc_test_tcp_large() {
     dd if=/dev/urandom of="$in" bs=1048576 count=10 status=none || return 1
     kc_test_tcp_start "$backend_port" || return 1
     if [ -n "$pass_key" ]; then
-        HPM_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/large-set.log" 2>&1 &
+        P2P_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/large-set.log" 2>&1 &
     else
         "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/large-set.log" 2>&1 &
     fi
@@ -559,13 +559,13 @@ kc_test_tcp_loss() {
 
     kc_test_tcp_start "$backend_port" || return 1
     if [ -n "$pass_key" ]; then
-        HPM_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/loss-set.log" 2>&1 &
+        P2P_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/loss-set.log" 2>&1 &
     else
         "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/loss-set.log" 2>&1 &
     fi
     spid=$!
     sleep 2
-    HPM_DEBUG_STREAM_DROP_EVERY=1 "$BIN" con "${host}@127.0.0.1:${port}" --tcp "$listen_port" > "$TMP_ROOT/loss-con.log" 2>&1 &
+    P2P_DEBUG_STREAM_DROP_EVERY=1 "$BIN" con "${host}@127.0.0.1:${port}" --tcp "$listen_port" > "$TMP_ROOT/loss-con.log" 2>&1 &
     cpid=$!
     sleep 2
 
@@ -602,13 +602,13 @@ kc_test_tcp_loss_bidir() {
 
     kc_test_tcp_start "$backend_port" || return 1
     if [ -n "$pass_key" ]; then
-        HPM_PASS="$pass_key" HPM_DEBUG_STREAM_DROP_EVERY=1 "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/loss-bidir-set.log" 2>&1 &
+        P2P_PASS="$pass_key" P2P_DEBUG_STREAM_DROP_EVERY=1 "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/loss-bidir-set.log" 2>&1 &
     else
-        HPM_DEBUG_STREAM_DROP_EVERY=1 "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/loss-bidir-set.log" 2>&1 &
+        P2P_DEBUG_STREAM_DROP_EVERY=1 "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/loss-bidir-set.log" 2>&1 &
     fi
     spid=$!
     sleep 2
-    HPM_DEBUG_STREAM_DROP_EVERY=1 "$BIN" con "${host}@127.0.0.1:${port}" --tcp "$listen_port" > "$TMP_ROOT/loss-bidir-con.log" 2>&1 &
+    P2P_DEBUG_STREAM_DROP_EVERY=1 "$BIN" con "${host}@127.0.0.1:${port}" --tcp "$listen_port" > "$TMP_ROOT/loss-bidir-con.log" 2>&1 &
     cpid=$!
     sleep 2
 
@@ -647,13 +647,13 @@ kc_test_tcp_reorder() {
     dd if=/dev/urandom of="$in" bs=4096 count=1 status=none || return 1
     kc_test_tcp_start "$backend_port" || return 1
     if [ -n "$pass_key" ]; then
-        HPM_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/reorder-set.log" 2>&1 &
+        P2P_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/reorder-set.log" 2>&1 &
     else
         "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/reorder-set.log" 2>&1 &
     fi
     spid=$!
     sleep 2
-    HPM_DEBUG_STREAM_REORDER_EVERY=1 "$BIN" con "${host}@127.0.0.1:${port}" --tcp "$listen_port" > "$TMP_ROOT/reorder-con.log" 2>&1 &
+    P2P_DEBUG_STREAM_REORDER_EVERY=1 "$BIN" con "${host}@127.0.0.1:${port}" --tcp "$listen_port" > "$TMP_ROOT/reorder-con.log" 2>&1 &
     cpid=$!
     sleep 2
 
@@ -691,7 +691,7 @@ kc_test_tcp_concurrent() {
 
     kc_test_tcp_start "$backend_port" || return 1
     if [ -n "$pass_key" ]; then
-        HPM_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/concurrent-set.log" 2>&1 &
+        P2P_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/concurrent-set.log" 2>&1 &
     else
         "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/concurrent-set.log" 2>&1 &
     fi
@@ -734,7 +734,7 @@ kc_test_set_udp() {
     pass_key=$4
     kc_test_udp_start "$backend_port" || return 1
     if [ -n "$pass_key" ]; then
-        HPM_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --udp "$backend_port" > "$TMP_ROOT/set-udp-$host.log" 2>&1 &
+        P2P_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --udp "$backend_port" > "$TMP_ROOT/set-udp-$host.log" 2>&1 &
     else
         "$BIN" set "${host}@127.0.0.1:${port}" --udp "$backend_port" > "$TMP_ROOT/set-udp-$host.log" 2>&1 &
     fi
@@ -767,7 +767,7 @@ kc_test_udp_echo() {
 
     kc_test_udp_start "$backend_port" || return 1
     if [ -n "$pass_key" ]; then
-        HPM_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --udp "$backend_port" > "$TMP_ROOT/udp-set.log" 2>&1 &
+        P2P_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --udp "$backend_port" > "$TMP_ROOT/udp-set.log" 2>&1 &
     else
         "$BIN" set "${host}@127.0.0.1:${port}" --udp "$backend_port" > "$TMP_ROOT/udp-set.log" 2>&1 &
     fi
@@ -820,7 +820,7 @@ kc_test_auth_register() {
     kc_test_index_stop
     kc_test_index_start "$auth_port_bad" 0 abc auth-wrong-pass || return 1
     kc_test_tcp_start "$auth_backend_bad" || return 1
-    HPM_PASS=wrong "$BIN" set authbad@127.0.0.1:"$auth_port_bad" --tcp "$auth_backend_bad" > "$TMP_ROOT/auth-bad.log" 2>&1 &
+    P2P_PASS=wrong "$BIN" set authbad@127.0.0.1:"$auth_port_bad" --tcp "$auth_backend_bad" > "$TMP_ROOT/auth-bad.log" 2>&1 &
     spid=$!
     sleep 2
     if kill -0 "$spid" 2>/dev/null; then
@@ -943,7 +943,7 @@ kc_test_main() {
     return 0
 }
 
-trap 'status=$?; pkill -9 -P $$ 2>/dev/null || true; pkill -9 -f "bin/x86_64/linux/hpm" 2>/dev/null || true; rm -rf "$TMP_ROOT"; exit "${status:-0}"' EXIT INT HUP TERM
+trap 'status=$?; pkill -9 -P $$ 2>/dev/null || true; pkill -9 -f "bin/x86_64/linux/p2p" 2>/dev/null || true; rm -rf "$TMP_ROOT"; exit "${status:-0}"' EXIT INT HUP TERM
 
 if kc_test_main; then
     exit 0

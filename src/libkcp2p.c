@@ -377,7 +377,7 @@ typedef struct {
     char nonce_hex[17];
     char id[KC_P2P_ID_MAX + 1];
     struct sockaddr_storage addr;
-    time_t issued_at;
+    uint64_t issued_at;
 } kc_p2p_pow_challenge_t;
 
 /**
@@ -592,7 +592,7 @@ typedef struct {
     char target_id[KC_P2P_ID_MAX + 1];
     char sess_id[64];
     kc_p2p_fd_t consumer_fd;
-    time_t ts;
+    uint64_t ts;
 } kc_p2p_pending_punch_t;
 
 struct kc_p2p {
@@ -633,8 +633,8 @@ typedef struct kc_p2p_udp_consumer_session {
     kc_p2p_fd_t tcp_fd;
     struct sockaddr_storage client_addr;
     struct sockaddr_storage peer_addr;
-    time_t last_rx;
-    time_t last_ka;
+    uint64_t last_rx;
+    uint64_t last_ka;
     int active;
     int is_tcp;
     kc_p2p_stream_state_t stream;
@@ -644,8 +644,8 @@ typedef struct kc_p2p_udp_server_session {
     kc_p2p_fd_t backend_fd;
     kc_p2p_fd_t tcp_fd;
     struct sockaddr_storage peer_addr;
-    time_t last_rx;
-    time_t last_ka;
+    uint64_t last_rx;
+    uint64_t last_ka;
     int active;
     int is_tcp;
     kc_p2p_stream_state_t stream;
@@ -905,6 +905,15 @@ static uint64_t kc_p2p_now_ms(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
 #endif
+}
+
+/**
+ * Returns a second timestamp.
+ * Summary: Used for elapsed-time logic to avoid wall-clock jumps.
+ * @return Monotonic-ish timestamp in seconds.
+ */
+static uint64_t kc_p2p_now_s(void) {
+    return kc_p2p_now_ms() / 1000;
 }
 
 #ifdef KC_P2P_TEST_RANDOM
@@ -3210,9 +3219,9 @@ static int kc_p2p_find_peer(kc_p2p_t *ctx, const char *id) {
  * @return Status code.
  */
 static void kc_p2p_evict_stale(kc_p2p_t *ctx) {
-    time_t now;
+    uint64_t now;
     int i;
-    now = time(NULL);
+    now = kc_p2p_now_s();
     for (i = ctx->n_peers - 1; i >= 0; i--) {
         if (now - ctx->peers[i].last_seen > KC_P2P_ETIMEOUT_SEC) {
             if (i < ctx->n_peers - 1) {
@@ -3260,7 +3269,7 @@ static int kc_p2p_add_peer(kc_p2p_t *ctx, const char *id)
 
     idx = kc_p2p_find_peer(ctx, id);
     if (idx >= 0) {
-        ctx->peers[idx].last_seen = time(NULL);
+        ctx->peers[idx].last_seen = kc_p2p_now_s();
         if (!kc_p2p_generate_key(ctx->peers[idx].key))
             return KC_P2P_ERROR;
         return KC_P2P_OK;
@@ -3278,7 +3287,7 @@ static int kc_p2p_add_peer(kc_p2p_t *ctx, const char *id)
     memcpy(ctx->peers[ctx->n_peers].id, id, id_len);
     ctx->peers[ctx->n_peers].id[id_len] = '\0';
 
-    ctx->peers[ctx->n_peers].last_seen = time(NULL);
+    ctx->peers[ctx->n_peers].last_seen = kc_p2p_now_s();
     if (!kc_p2p_generate_key(ctx->peers[ctx->n_peers].key))
         return KC_P2P_ERROR;
     ctx->n_peers++;
@@ -3320,7 +3329,7 @@ static int kc_p2p_refresh_peer(kc_p2p_t *ctx, const char *id)
 
     idx = kc_p2p_find_peer(ctx, id);
     if (idx < 0) return KC_P2P_ENOENT;
-    ctx->peers[idx].last_seen = time(NULL);
+    ctx->peers[idx].last_seen = kc_p2p_now_s();
     return KC_P2P_OK;
 }
 
@@ -3388,7 +3397,7 @@ static int kc_p2p_store_pow_challenge(kc_p2p_t *ctx,
     ctx->pow_challenges[idx].id[id_len] = '\0';
     ctx->pow_challenges[idx].id[KC_P2P_ID_MAX] = '\0';
     ctx->pow_challenges[idx].addr = *peer_sa;
-    ctx->pow_challenges[idx].issued_at = time(NULL);
+    ctx->pow_challenges[idx].issued_at = kc_p2p_now_s();
     return 1;
 }
 
@@ -3492,7 +3501,7 @@ static void kc_p2p_pending_punch_remove(kc_p2p_t *ctx, int idx) {
  * @return None.
  */
 static void kc_p2p_pending_punch_evict_stale(kc_p2p_t *ctx) {
-    time_t now = time(NULL);
+    uint64_t now = kc_p2p_now_s();
     for (int i = 0; i < ctx->n_pending_punches; i++) {
         if (now - ctx->pending_punches[i].ts > 30) {
             ctx->pending_punches[i] = ctx->pending_punches[--ctx->n_pending_punches];
@@ -5096,7 +5105,7 @@ int kc_p2p_serve_index(
                                         snprintf(pp->target_id, sizeof(pp->target_id), "%s", target_id);
                                         snprintf(pp->sess_id, sizeof(pp->sess_id), "%s", sess_id);
                                         pp->consumer_fd = c->fd;
-                                        pp->ts = time(NULL);
+                                        pp->ts = kc_p2p_now_s();
                                     } else {
                                         kc_p2p_tcp_send(c->fd, "ERROR:busy");
                                     }
@@ -5364,7 +5373,7 @@ int kc_p2p_wait(
     char send_buf[KC_P2P_BUF];
     char recv_buf[KC_P2P_BUF];
     kc_p2p_fd_t udp_fd = KC_P2P_FD_INVALID;
-    time_t last_heartbeat;
+    uint64_t last_heartbeat;
     const char *udp_any_host;
 
     (void)bind_port;
@@ -5449,7 +5458,7 @@ int kc_p2p_wait(
         sessions = NULL;
         n_sessions = 0;
         cap_sessions = 0;
-        last_heartbeat = time(NULL);
+        last_heartbeat = kc_p2p_now_s();
 
         kc_p2p_set_nonblock(control_fd);
         kc_p2p_set_nonblock(udp_fd);
@@ -5481,10 +5490,10 @@ int kc_p2p_wait(
             if (n < 0) continue;
             if (kc_p2p_stop_requested) break;
 
-            if (time(NULL) - last_heartbeat >= KC_P2P_HEARTBEAT_S) {
+            if (kc_p2p_now_s() - last_heartbeat >= KC_P2P_HEARTBEAT_S) {
                 snprintf(send_buf, sizeof(send_buf), "REGISTER:%s", self_id);
                 kc_p2p_tcp_send(control_fd, send_buf);
-                last_heartbeat = time(NULL);
+                last_heartbeat = kc_p2p_now_s();
             }
 
             if (FD_ISSET(control_fd, &fds)) {
@@ -5572,7 +5581,7 @@ int kc_p2p_wait(
                             kc_p2p_udp_server_session_t sess;
                             memset(&sess, 0, sizeof(sess));
                             sess.peer_addr = peer;
-                            sess.last_rx = time(NULL);
+                            sess.last_rx = kc_p2p_now_s();
                             sess.last_ka = sess.last_rx;
                             sess.is_tcp = (ctx->proto == KC_P2P_PROTO_TCP) ? 1 : 0;
                             sess.tcp_fd = KC_P2P_FD_INVALID;
@@ -5650,7 +5659,7 @@ int kc_p2p_wait(
                             strncmp(buf, "P2P_PUNCH:", 10) == 0 ||
                             strncmp(buf, "PUNCH_PING:", 11) == 0 ||
                             strncmp(buf, "PUNCH_PONG:", 11) == 0) {
-                            sessions[found].last_rx = time(NULL);
+                            sessions[found].last_rx = kc_p2p_now_s();
                         } else {
                             if (sessions[found].is_tcp) {
                                 if (sessions[found].backend_fd != KC_P2P_FD_INVALID &&
@@ -5672,7 +5681,7 @@ int kc_p2p_wait(
                                 sendto(sessions[found].backend_fd, buf, (size_t)n, 0,
                                     (const struct sockaddr *)&backend_addr, sizeof(backend_addr));
                             }
-                            sessions[found].last_rx = time(NULL);
+                            sessions[found].last_rx = kc_p2p_now_s();
                         }
                     } else if (strncmp(buf, "PUNCH_PING:", 11) == 0) {
                         char pong[256];
@@ -5693,7 +5702,7 @@ int kc_p2p_wait(
                         }
                         if (unset >= 0) {
                             sessions[unset].peer_addr = from;
-                            sessions[unset].last_rx = time(NULL);
+                            sessions[unset].last_rx = kc_p2p_now_s();
                             sessions[unset].last_ka = sessions[unset].last_rx;
                             kc_p2p_sendto_addr(udp_fd, buf, (size_t)n, &from);
                             if (strncmp(buf, "P2P_PUNCH:", 10) != 0 &&
@@ -5747,7 +5756,7 @@ int kc_p2p_wait(
                     if (n > 0) {
                         kc_p2p_sendto_addr(udp_fd, buf, (size_t)n,
                             &sessions[i].peer_addr);
-                        sessions[i].last_rx = time(NULL);
+                        sessions[i].last_rx = kc_p2p_now_s();
                     }
                 }
             }
@@ -5766,12 +5775,12 @@ int kc_p2p_wait(
                         continue;
                     }
                 }
-                if (time(NULL) - sessions[i].last_ka > KC_P2P_KEEPALIVE_S) {
+                if (kc_p2p_now_s() - sessions[i].last_ka > KC_P2P_KEEPALIVE_S) {
                 kc_p2p_sendto_addr(udp_fd, "P2P_KA:", 7,
                     &sessions[i].peer_addr);
-                    sessions[i].last_ka = time(NULL);
+                    sessions[i].last_ka = kc_p2p_now_s();
                 }
-                if (time(NULL) - sessions[i].last_rx > KC_P2P_DISCONNECT_S) {
+                if (kc_p2p_now_s() - sessions[i].last_rx > KC_P2P_DISCONNECT_S) {
                     kc_p2p_server_session_close(&sessions[i]);
                 }
             }
@@ -6064,7 +6073,7 @@ int kc_p2p_connect(
                             sess.tcp_fd = client_fd;
                             sess.active = 1;
                             sess.is_tcp = 1;
-                            sess.last_rx = time(NULL);
+                            sess.last_rx = kc_p2p_now_s();
                             sess.last_ka = sess.last_rx;
                             memset(&sess.client_addr, 0, sizeof(sess.client_addr));
                             if (n_sessions >= cap_sessions) {
@@ -6148,7 +6157,7 @@ int kc_p2p_connect(
                             &sess.fd, &sess.peer_addr, &sess) == KC_P2P_OK)
                         {
                             sess.client_addr = from;
-                            sess.last_rx = time(NULL);
+                            sess.last_rx = kc_p2p_now_s();
                             sess.last_ka = sess.last_rx;
                             sess.active = 1;
                             sess.is_tcp = 0;
@@ -6170,7 +6179,7 @@ udp_skip:
                 if (found >= 0) {
                     kc_p2p_sendto_addr(sessions[found].fd, buf, (size_t)n,
                         &sessions[found].peer_addr);
-                    sessions[found].last_rx = time(NULL);
+                    sessions[found].last_rx = kc_p2p_now_s();
                 }
             }
         }
@@ -6188,7 +6197,7 @@ udp_skip:
                     (n >= 10 && strncmp(buf, "P2P_PUNCH:", 10) == 0) ||
                     (n >= 11 && strncmp(buf, "PUNCH_PING:", 11) == 0) ||
                     (n >= 11 && strncmp(buf, "PUNCH_PONG:", 11) == 0)) {
-                    sessions[i].last_rx = time(NULL);
+                    sessions[i].last_rx = kc_p2p_now_s();
                 } else {
                     if (sessions[i].is_tcp) {
                         if (sessions[i].tcp_fd != KC_P2P_FD_INVALID &&
@@ -6203,7 +6212,7 @@ udp_skip:
                         kc_p2p_sendto_addr(local_fd, buf, (size_t)n,
                             &sessions[i].client_addr);
                     }
-                    sessions[i].last_rx = time(NULL);
+                    sessions[i].last_rx = kc_p2p_now_s();
                 }
             }
         }
@@ -6222,12 +6231,12 @@ udp_skip:
                     continue;
                 }
             }
-            if (time(NULL) - sessions[i].last_ka > KC_P2P_KEEPALIVE_S) {
+            if (kc_p2p_now_s() - sessions[i].last_ka > KC_P2P_KEEPALIVE_S) {
                 kc_p2p_sendto_addr(sessions[i].fd, "P2P_KA:", 7,
                     &sessions[i].peer_addr);
-                sessions[i].last_ka = time(NULL);
+                sessions[i].last_ka = kc_p2p_now_s();
             }
-            if (time(NULL) - sessions[i].last_rx > KC_P2P_DISCONNECT_S) {
+            if (kc_p2p_now_s() - sessions[i].last_rx > KC_P2P_DISCONNECT_S) {
                 kc_p2p_consumer_session_close(&sessions[i]);
             }
         }

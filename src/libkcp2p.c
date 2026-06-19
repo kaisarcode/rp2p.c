@@ -1348,21 +1348,6 @@ static int kc_p2p_stream_decrypt_packet(kc_p2p_stream_state_t *st,
 }
 
 /**
- * Finds one resend slot by sequence number.
- * @return Matching slot, or NULL.
- */
-static kc_p2p_stream_send_slot_t *kc_p2p_stream_find_send_slot(
-    kc_p2p_stream_state_t *st, uint32_t seq)
-{
-    int i;
-    for (i = 0; i < KC_P2P_STREAM_SEND_WINDOW; i++) {
-        if (st->out.slots[i].used && st->out.slots[i].seq == seq)
-            return &st->out.slots[i];
-    }
-    return NULL;
-}
-
-/**
  * Finds one receive slot by sequence number.
  * @return Matching slot, or NULL.
  */
@@ -1575,18 +1560,23 @@ static int kc_p2p_stream_note_sack(kc_p2p_t *ctx, kc_p2p_fd_t fd,
     const struct sockaddr_storage *peer_addr,
     kc_p2p_stream_state_t *st, uint32_t gap_start, uint32_t gap_end)
 {
-    uint32_t seq;
-    for (seq = gap_start; seq <= gap_end; seq++) {
-        kc_p2p_stream_send_slot_t *slot = kc_p2p_stream_find_send_slot(st, seq);
-        if (!slot) continue;
+    int i;
+
+    if (gap_start == 0 || gap_end < gap_start) return 0;
+    if (gap_start >= st->out.next_seq) return 0;
+
+    for (i = 0; i < KC_P2P_STREAM_SEND_WINDOW; i++) {
+        kc_p2p_stream_send_slot_t *slot = &st->out.slots[i];
+        if (!slot->used) continue;
+        if (slot->seq < gap_start || slot->seq > gap_end) continue;
         if (slot->attempts >= KC_P2P_STREAM_MAX_RETRIES) continue;
+
         if (kc_p2p_stream_send_raw(ctx, fd, peer_addr, slot->frame,
             slot->frame_len) == 0) {
             slot->attempts++;
             slot->last_tx_ms = kc_p2p_now_ms();
             st->last_tx_ms = slot->last_tx_ms;
         }
-        if (seq == gap_end) break;
     }
     return 0;
 }

@@ -52,6 +52,8 @@ kc_test_cli() {
     if "$BIN" set 'bad-id@127.0.0.1:1' --tcp 1 > /dev/null 2>&1; then kc_test_fail "cli: non-alnum set id should fail"; return 1; fi
     if "$BIN" con 'bad_id@127.0.0.1:1' --tcp 1 > /dev/null 2>&1; then kc_test_fail "cli: non-alnum con id should fail"; return 1; fi
     if P2P_PASS='bad`tick' "$BIN" set foo@127.0.0.1:1 --tcp 1 > /dev/null 2>&1; then kc_test_fail "cli: invalid P2P_PASS should fail"; return 1; fi
+    if "$BIN" con 'foo@[::1]:1' --tcp 1 > /dev/null 2>&1; then :; fi
+    if "$BIN" con 'foo@[::1' --tcp 1 > /dev/null 2>&1; then kc_test_fail "cli: malformed bracketed IPv6 should fail"; return 1; fi
     kc_test_pass "cli"; return 0
 }
 
@@ -404,6 +406,60 @@ kc_test_control_catalog() {
         return 1
     fi
     kc_test_pass "control-catalog"
+    return 0
+}
+
+# Verifies TCP control and direct tunnel operation over IPv6 loopback.
+# @return 0 on success, 1 on failure.
+kc_test_ipv6_loopback() {
+    port=$1
+    backend_port=$2
+    listen_port=$3
+    out="$TMP_ROOT/ipv6.out"
+    list_out="$TMP_ROOT/ipv6-list.out"
+
+    if [ ! -r /proc/net/if_inet6 ] ||
+        ! grep -q '00000000000000000000000000000001' /proc/net/if_inet6
+    then
+        kc_test_pass "ipv6-loopback-skipped"
+        return 0
+    fi
+    kc_test_index_start "$port" 0 "" ipv6 || return 1
+    if ! printf 'HELLO KCP2P/1\nLIST\n' | socat -t 2 - "TCP6:[::1]:$port" > "$list_out" 2>/dev/null; then
+        kc_test_index_stop
+        kc_test_fail "ipv6-control"
+        return 1
+    fi
+    if ! grep -q '^END$' "$list_out"; then
+        kc_test_index_stop
+        kc_test_fail "ipv6-control"
+        return 1
+    fi
+    kc_test_tcp_start "$backend_port" || return 1
+    "$BIN" set "ipv6tcp@[::1]:$port" --tcp "$backend_port" > "$TMP_ROOT/ipv6-set.log" 2>&1 &
+    spid=$!
+    sleep 2
+    "$BIN" con "ipv6tcp@[::1]:$port" --tcp "$listen_port" > "$TMP_ROOT/ipv6-con.log" 2>&1 &
+    cpid=$!
+    sleep 2
+    if ! kc_test_tcp_roundtrip "$listen_port" "ip6" "$out"; then
+        kill -9 "$spid" "$cpid" "$HPID" 2>/dev/null
+        wait "$spid" "$cpid" "$HPID" 2>/dev/null
+        kc_test_index_stop
+        kc_test_fail "ipv6-tcp-echo"
+        return 1
+    fi
+    if ! grep -q "ip6" "$out"; then
+        kill -9 "$spid" "$cpid" "$HPID" 2>/dev/null
+        wait "$spid" "$cpid" "$HPID" 2>/dev/null
+        kc_test_index_stop
+        kc_test_fail "ipv6-tcp-echo"
+        return 1
+    fi
+    kill -9 "$spid" "$cpid" "$HPID" 2>/dev/null
+    wait "$spid" "$cpid" "$HPID" 2>/dev/null
+    kc_test_index_stop
+    kc_test_pass "ipv6-loopback"
     return 0
 }
 
@@ -932,12 +988,16 @@ kc_test_main() {
     vip_seat_backend_4=$((PORT_BASE + 36))
     control_backend=$((PORT_BASE + 29))
     auth_listen_1=$((PORT_BASE + 112))
+    ipv6_port=$((PORT_BASE + 37))
+    ipv6_backend=$((PORT_BASE + 38))
+    ipv6_listen=$((PORT_BASE + 121))
 
     kc_test_binary || return 1
     kc_test_cli || return 1
     kc_test_index_start "$index_port" 0 "" public-default || return 1
     kc_test_index_tcp_only "$index_port" || return 1
     kc_test_control_catalog "$index_port" "$control_backend" || return 1
+    kc_test_ipv6_loopback "$ipv6_port" "$ipv6_backend" "$ipv6_listen" || return 1
     kc_test_set_tcp "$index_port" host1 "$backend_tcp_1" "" || return 1
     kc_test_tcp_echo "$index_port" web "$backend_tcp_2" "$listen_tcp_1" "" || return 1
     kc_test_tcp_concurrent "$index_port" web2 "$backend_tcp_3" "$listen_tcp_2" "" || return 1

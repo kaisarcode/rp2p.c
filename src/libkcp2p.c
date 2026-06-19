@@ -355,7 +355,7 @@ static void kc_p2p_sha256_final(kc_p2p_sha256_t *ctx, unsigned char hash[32]) {
 typedef struct {
     char nonce_hex[17];
     char id[KC_P2P_ID_MAX + 1];
-    struct sockaddr_in addr;
+    struct sockaddr_storage addr;
     time_t issued_at;
 } kc_p2p_pow_challenge_t;
 
@@ -610,8 +610,8 @@ struct kc_p2p {
 typedef struct kc_p2p_udp_consumer_session {
     kc_p2p_fd_t fd;
     kc_p2p_fd_t tcp_fd;
-    struct sockaddr_in client_addr;
-    struct sockaddr_in peer_addr;
+    struct sockaddr_storage client_addr;
+    struct sockaddr_storage peer_addr;
     time_t last_rx;
     time_t last_ka;
     int active;
@@ -622,7 +622,7 @@ typedef struct kc_p2p_udp_consumer_session {
 typedef struct kc_p2p_udp_server_session {
     kc_p2p_fd_t backend_fd;
     kc_p2p_fd_t tcp_fd;
-    struct sockaddr_in peer_addr;
+    struct sockaddr_storage peer_addr;
     time_t last_rx;
     time_t last_ka;
     int active;
@@ -641,6 +641,7 @@ typedef pthread_t kc_p2p_thread_t;
 static int kc_p2p_sock_read(kc_p2p_fd_t fd, char *buf, int len);
 static int kc_p2p_write_all(kc_p2p_fd_t fd, const char *buf, int len);
 static void kc_p2p_shutdown_write(kc_p2p_fd_t fd);
+static socklen_t kc_p2p_sockaddr_len(const struct sockaddr_storage *addr);
 static int kc_p2p_is_space(char ch);
 static char *kc_p2p_trim(char *text);
 static int kc_p2p_find_vip(kc_p2p_t *ctx, const char *id);
@@ -1063,11 +1064,14 @@ static void kc_p2p_stream_init(kc_p2p_stream_state_t *st, int initiator,
  * @return 0 on success, -1 on error.
  */
 static int kc_p2p_stream_send_raw(kc_p2p_t *ctx, kc_p2p_fd_t fd,
-    const struct sockaddr_in *peer_addr, const unsigned char *buf, size_t len)
+    const struct sockaddr_storage *peer_addr, const unsigned char *buf, size_t len)
 {
     static kc_p2p_stream_pending_frame_t pending;
+    socklen_t peer_len;
 
     (void)ctx;
+    peer_len = kc_p2p_sockaddr_len(peer_addr);
+    if (peer_len == 0) return -1;
 
     if (kc_p2p_stream_should_drop_once(buf, len)) return 0;
     if (!pending.used && kc_p2p_stream_should_reorder_once(buf, len)) {
@@ -1077,11 +1081,11 @@ static int kc_p2p_stream_send_raw(kc_p2p_t *ctx, kc_p2p_fd_t fd,
         return 0;
     }
     if (sendto(fd, (const char *)buf, len, 0,
-        (const struct sockaddr *)peer_addr, sizeof(*peer_addr)) < 0)
+        (const struct sockaddr *)peer_addr, peer_len) < 0)
         return -1;
     if (pending.used) {
         if (sendto(fd, (const char *)pending.frame, pending.len, 0,
-            (const struct sockaddr *)peer_addr, sizeof(*peer_addr)) < 0)
+            (const struct sockaddr *)peer_addr, peer_len) < 0)
             return -1;
         pending.used = 0;
     }
@@ -1397,7 +1401,7 @@ static void kc_p2p_stream_ack_until(kc_p2p_stream_state_t *st, uint32_t ack) {
  * @return 0 on success, -1 on error.
  */
 static int kc_p2p_stream_send_control(kc_p2p_t *ctx, kc_p2p_fd_t fd,
-    const struct sockaddr_in *peer_addr,
+    const struct sockaddr_storage *peer_addr,
     kc_p2p_stream_state_t *st, uint8_t type, uint32_t seq,
     uint32_t gap_start, uint32_t gap_end)
 {
@@ -1430,7 +1434,7 @@ static int kc_p2p_stream_send_control(kc_p2p_t *ctx, kc_p2p_fd_t fd,
  * @return 0 on success, -1 on error.
  */
 static int kc_p2p_stream_send_hello(kc_p2p_t *ctx, kc_p2p_fd_t fd,
-    const struct sockaddr_in *peer_addr,
+    const struct sockaddr_storage *peer_addr,
     kc_p2p_stream_state_t *st, uint8_t type)
 {
     unsigned char frame[96];
@@ -1450,7 +1454,7 @@ static int kc_p2p_stream_send_hello(kc_p2p_t *ctx, kc_p2p_fd_t fd,
  * @return 0 on success, -1 on error.
  */
 static int kc_p2p_stream_queue_reliable(kc_p2p_t *ctx, kc_p2p_fd_t fd,
-    const struct sockaddr_in *peer_addr,
+    const struct sockaddr_storage *peer_addr,
     kc_p2p_stream_state_t *st, uint8_t type,
     const unsigned char *plain, size_t plain_len)
 {
@@ -1543,7 +1547,7 @@ static int kc_p2p_stream_store_inbound(kc_p2p_stream_state_t *st,
  * @return 0 on success, -1 on transport error.
  */
 static int kc_p2p_stream_note_sack(kc_p2p_t *ctx, kc_p2p_fd_t fd,
-    const struct sockaddr_in *peer_addr,
+    const struct sockaddr_storage *peer_addr,
     kc_p2p_stream_state_t *st, uint32_t gap_start, uint32_t gap_end)
 {
     uint32_t seq;
@@ -1567,7 +1571,7 @@ static int kc_p2p_stream_note_sack(kc_p2p_t *ctx, kc_p2p_fd_t fd,
  * @return 0 on success, -1 on session failure.
  */
 static int kc_p2p_stream_process_packet(kc_p2p_t *ctx, kc_p2p_fd_t fd,
-    const struct sockaddr_in *peer_addr,
+    const struct sockaddr_storage *peer_addr,
     kc_p2p_stream_state_t *st, kc_p2p_fd_t tcp_fd,
     const unsigned char *buf, size_t len)
 {
@@ -1673,7 +1677,7 @@ static int kc_p2p_stream_process_packet(kc_p2p_t *ctx, kc_p2p_fd_t fd,
  * @return 0 on success, -1 on session failure.
  */
 static int kc_p2p_stream_pump_tcp(kc_p2p_t *ctx, kc_p2p_fd_t fd,
-    const struct sockaddr_in *peer_addr,
+    const struct sockaddr_storage *peer_addr,
     kc_p2p_stream_state_t *st, kc_p2p_fd_t tcp_fd)
 {
     unsigned char buf[KC_P2P_STREAM_MAX_PAYLOAD];
@@ -1705,7 +1709,7 @@ static int kc_p2p_stream_pump_tcp(kc_p2p_t *ctx, kc_p2p_fd_t fd,
  * @return 0 on success, -1 on timeout or transport error.
  */
 static int kc_p2p_stream_tick(kc_p2p_t *ctx, kc_p2p_fd_t fd,
-    const struct sockaddr_in *peer_addr,
+    const struct sockaddr_storage *peer_addr,
     kc_p2p_stream_state_t *st)
 {
     uint64_t now = kc_p2p_now_ms();
@@ -2018,22 +2022,135 @@ int kc_p2p_resolve(
     const char *host,
     unsigned short port,
     int socktype,
-    struct sockaddr_in *out)
+    struct sockaddr_storage *out,
+    socklen_t *out_len)
 {
     struct addrinfo hints;
     struct addrinfo *ai;
     char port_str[16];
 
+    if (!out || !out_len) return -1;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
+    hints.ai_family = host ? AF_UNSPEC : AF_INET6;
     hints.ai_socktype = socktype;
 
     snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
     if (getaddrinfo(host, port_str, &hints, &ai) != 0) return -1;
 
+    if ((size_t)ai->ai_addrlen > sizeof(*out)) {
+        freeaddrinfo(ai);
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
     memcpy(out, ai->ai_addr, ai->ai_addrlen);
+    *out_len = (socklen_t)ai->ai_addrlen;
     freeaddrinfo(ai);
     return 0;
+}
+
+/**
+ * Returns the socket address length for a stored address family.
+ * @param addr Stored socket address.
+ * @return Socket address length, or 0 for unsupported families.
+ */
+static socklen_t kc_p2p_sockaddr_len(const struct sockaddr_storage *addr) {
+    if (!addr) return 0;
+    if (addr->ss_family == AF_INET) return sizeof(struct sockaddr_in);
+    if (addr->ss_family == AF_INET6) return sizeof(struct sockaddr_in6);
+    return 0;
+}
+
+/**
+ * Returns the UDP or TCP port from a stored socket address.
+ * @param addr Stored socket address.
+ * @return Host-order port, or 0 for unsupported families.
+ */
+static unsigned short kc_p2p_sockaddr_port(
+    const struct sockaddr_storage *addr)
+{
+    if (!addr) return 0;
+    if (addr->ss_family == AF_INET)
+        return ntohs(((const struct sockaddr_in *)addr)->sin_port);
+    if (addr->ss_family == AF_INET6)
+        return ntohs(((const struct sockaddr_in6 *)addr)->sin6_port);
+    return 0;
+}
+
+/**
+ * Sets the UDP or TCP port in a stored socket address.
+ * @param addr Stored socket address.
+ * @param port Host-order port.
+ * @return 1 on success, 0 for unsupported families.
+ */
+static int kc_p2p_sockaddr_set_port(struct sockaddr_storage *addr,
+    unsigned short port)
+{
+    if (!addr) return 0;
+    if (addr->ss_family == AF_INET) {
+        ((struct sockaddr_in *)addr)->sin_port = htons(port);
+        return 1;
+    }
+    if (addr->ss_family == AF_INET6) {
+        ((struct sockaddr_in6 *)addr)->sin6_port = htons(port);
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * Compares stored socket endpoints by family, address, and port.
+ * @param a First address.
+ * @param b Second address.
+ * @return 1 when endpoints match, 0 otherwise.
+ */
+static int kc_p2p_sockaddr_equal(const struct sockaddr_storage *a,
+    const struct sockaddr_storage *b)
+{
+    if (!a || !b || a->ss_family != b->ss_family) return 0;
+    if (a->ss_family == AF_INET) {
+        const struct sockaddr_in *aa = (const struct sockaddr_in *)a;
+        const struct sockaddr_in *bb = (const struct sockaddr_in *)b;
+        return aa->sin_port == bb->sin_port &&
+            aa->sin_addr.s_addr == bb->sin_addr.s_addr;
+    }
+    if (a->ss_family == AF_INET6) {
+        const struct sockaddr_in6 *aa = (const struct sockaddr_in6 *)a;
+        const struct sockaddr_in6 *bb = (const struct sockaddr_in6 *)b;
+        return aa->sin6_port == bb->sin6_port &&
+            memcmp(&aa->sin6_addr, &bb->sin6_addr,
+                sizeof(aa->sin6_addr)) == 0;
+    }
+    return 0;
+}
+
+/**
+ * Sends bytes to one stored socket address.
+ * @param fd   UDP socket.
+ * @param buf  Bytes to send.
+ * @param len  Byte count.
+ * @param addr Destination address.
+ * @return sendto result, or -1 for unsupported address families.
+ */
+static int kc_p2p_sendto_addr(kc_p2p_fd_t fd, const void *buf, size_t len,
+    const struct sockaddr_storage *addr)
+{
+    socklen_t addr_len;
+
+    addr_len = kc_p2p_sockaddr_len(addr);
+    if (addr_len == 0) return -1;
+    return (int)sendto(fd, buf, len, 0, (const struct sockaddr *)addr,
+        addr_len);
+}
+
+/**
+ * Reports whether a host string is an IPv6 literal.
+ * @param host Host string.
+ * @return 1 for IPv6 literals, 0 otherwise.
+ */
+static int kc_p2p_host_is_ipv6_literal(const char *host) {
+    struct in6_addr addr;
+
+    return host && inet_pton(AF_INET6, host, &addr) == 1;
 }
 
 /**
@@ -2099,18 +2216,19 @@ int kc_p2p_send_recv(
     size_t recv_cap,
     int timeout_sec)
 {
-    struct sockaddr_in srv;
+    struct sockaddr_storage srv;
+    socklen_t srv_len;
     socklen_t srclen;
     fd_set fds;
     struct timeval tv;
     int n;
-    struct sockaddr_in from;
+    struct sockaddr_storage from;
 
-    if (kc_p2p_resolve(srv_host, srv_port, SOCK_DGRAM, &srv) != 0)
+    if (kc_p2p_resolve(srv_host, srv_port, SOCK_DGRAM, &srv, &srv_len) != 0)
         return KC_P2P_ENET;
 
     if (sendto(fd, send_msg, strlen(send_msg), 0,
-        (const struct sockaddr *)&srv, sizeof(srv)) < 0)
+        (const struct sockaddr *)&srv, srv_len) < 0)
         return KC_P2P_ENET;
 
     if (!recv_buf || recv_cap == 0) return KC_P2P_OK;
@@ -2147,12 +2265,13 @@ kc_p2p_fd_t kc_p2p_create_socket(
     kc_p2p_fd_t fd;
     struct addrinfo hints;
     struct addrinfo *ai;
+    struct addrinfo *it;
     char port_str[16];
 
     if (kc_p2p_platform_init() != 0) return KC_P2P_FD_INVALID;
 
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_DGRAM;
     hints.ai_flags = AI_PASSIVE;
 
@@ -2160,24 +2279,27 @@ kc_p2p_fd_t kc_p2p_create_socket(
     if (getaddrinfo(bind_host, port_str, &hints, &ai) != 0)
         return KC_P2P_FD_INVALID;
 
-    fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-    if (KC_P2P_ISERR(fd)) {
-        freeaddrinfo(ai);
-        return KC_P2P_FD_INVALID;
-    }
-
-    {
-        int reuse = 1;
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
-            (void *)&reuse, sizeof(reuse));
-    }
-
-    if (bind(fd, ai->ai_addr, (socklen_t)ai->ai_addrlen) == SOCKET_ERROR) {
+    fd = KC_P2P_FD_INVALID;
+    for (it = ai; it; it = it->ai_next) {
+        fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+        if (KC_P2P_ISERR(fd)) continue;
+        {
+            int reuse = 1;
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+                (void *)&reuse, sizeof(reuse));
+        }
+#ifdef IPV6_V6ONLY
+        if (it->ai_family == AF_INET6) {
+            int v6only = 0;
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY,
+                (void *)&v6only, sizeof(v6only));
+        }
+#endif
+        if (bind(fd, it->ai_addr, (socklen_t)it->ai_addrlen) == 0)
+            break;
         KC_P2P_FD_CLOSE(fd);
-        freeaddrinfo(ai);
-        return KC_P2P_FD_INVALID;
+        fd = KC_P2P_FD_INVALID;
     }
-
     freeaddrinfo(ai);
     return fd;
 }
@@ -2198,34 +2320,37 @@ static kc_p2p_fd_t kc_p2p_create_tcp_listener(
     kc_p2p_fd_t fd;
     struct addrinfo hints;
     struct addrinfo *ai;
+    struct addrinfo *it;
     char port_str[16];
 
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
     snprintf(port_str, sizeof(port_str), "%u", (unsigned)bind_port);
     if (getaddrinfo(bind_host, port_str, &hints, &ai) != 0)
         return KC_P2P_FD_INVALID;
-    fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-    if (KC_P2P_ISERR(fd)) {
-        freeaddrinfo(ai);
-        return KC_P2P_FD_INVALID;
-    }
-    {
-        int reuse = 1;
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
-            (void *)&reuse, sizeof(reuse));
-    }
-    if (bind(fd, ai->ai_addr, (socklen_t)ai->ai_addrlen) == SOCKET_ERROR) {
+    fd = KC_P2P_FD_INVALID;
+    for (it = ai; it; it = it->ai_next) {
+        fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+        if (KC_P2P_ISERR(fd)) continue;
+        {
+            int reuse = 1;
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+                (void *)&reuse, sizeof(reuse));
+        }
+#ifdef IPV6_V6ONLY
+        if (it->ai_family == AF_INET6) {
+            int v6only = 0;
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY,
+                (void *)&v6only, sizeof(v6only));
+        }
+#endif
+        if (bind(fd, it->ai_addr, (socklen_t)it->ai_addrlen) == 0 &&
+            listen(fd, 32) == 0)
+            break;
         KC_P2P_FD_CLOSE(fd);
-        freeaddrinfo(ai);
-        return KC_P2P_FD_INVALID;
-    }
-    if (listen(fd, 32) == SOCKET_ERROR) {
-        KC_P2P_FD_CLOSE(fd);
-        freeaddrinfo(ai);
-        return KC_P2P_FD_INVALID;
+        fd = KC_P2P_FD_INVALID;
     }
     freeaddrinfo(ai);
     return fd;
@@ -2336,20 +2461,27 @@ static void kc_p2p_shutdown_write(kc_p2p_fd_t fd) {
  */
 static kc_p2p_fd_t kc_p2p_tcp_connect(const char *host, unsigned short port) {
     kc_p2p_fd_t fd;
-    struct sockaddr_in addr;
+    struct addrinfo hints;
+    struct addrinfo *ai;
+    struct addrinfo *it;
+    char port_str[16];
 
-    fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (KC_P2P_ISERR(fd)) return KC_P2P_FD_INVALID;
-
-    if (kc_p2p_resolve(host, port, SOCK_STREAM, &addr) != 0) {
-        KC_P2P_FD_CLOSE(fd);
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+    if (getaddrinfo(host, port_str, &hints, &ai) != 0)
         return KC_P2P_FD_INVALID;
-    }
-
-    if (connect(fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    fd = KC_P2P_FD_INVALID;
+    for (it = ai; it; it = it->ai_next) {
+        fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+        if (KC_P2P_ISERR(fd)) continue;
+        if (connect(fd, it->ai_addr, (socklen_t)it->ai_addrlen) == 0)
+            break;
         KC_P2P_FD_CLOSE(fd);
-        return KC_P2P_FD_INVALID;
+        fd = KC_P2P_FD_INVALID;
     }
+    freeaddrinfo(ai);
     return fd;
 }
 
@@ -3144,12 +3276,12 @@ static int kc_p2p_refresh_peer(kc_p2p_t *ctx, const char *id)
  * @return Challenge index on success, -1 on failure.
  */
 static int kc_p2p_find_pow_challenge(kc_p2p_t *ctx,
-    const struct sockaddr_in *peer_sa)
+    const struct sockaddr_storage *peer_sa)
 {
     int i;
 
     for (i = 0; i < ctx->n_pow_challenges; i++) {
-        if (memcmp(&ctx->pow_challenges[i].addr, peer_sa, sizeof(*peer_sa)) == 0)
+        if (kc_p2p_sockaddr_equal(&ctx->pow_challenges[i].addr, peer_sa))
             return i;
     }
     return -1;
@@ -3177,7 +3309,7 @@ static void kc_p2p_remove_pow_challenge(kc_p2p_t *ctx, int idx) {
  * @return 1 on success, 0 on failure.
  */
 static int kc_p2p_store_pow_challenge(kc_p2p_t *ctx,
-    const struct sockaddr_in *peer_sa, const char *id, const char *nonce_hex)
+    const struct sockaddr_storage *peer_sa, const char *id, const char *nonce_hex)
 {
     int idx;
     size_t id_len;
@@ -3200,7 +3332,7 @@ static int kc_p2p_store_pow_challenge(kc_p2p_t *ctx,
     memcpy(ctx->pow_challenges[idx].id, id, id_len);
     ctx->pow_challenges[idx].id[id_len] = '\0';
     ctx->pow_challenges[idx].id[KC_P2P_ID_MAX] = '\0';
-    memcpy(&ctx->pow_challenges[idx].addr, peer_sa, sizeof(*peer_sa));
+    ctx->pow_challenges[idx].addr = *peer_sa;
     ctx->pow_challenges[idx].issued_at = time(NULL);
     return 1;
 }
@@ -3476,22 +3608,38 @@ static int kc_p2p_parse_candidate_line(const char *line,
     kc_p2p_candidate_t *out)
 {
     const char *cursor;
+    const char *end;
     char type_text[16];
     char addr[KC_P2P_ADDR_MAX + 1];
     char port_text[8];
     struct in_addr ipv4;
+    struct in6_addr ipv6;
+    size_t addr_len;
 
     if (!line || !out || strncmp(line, "CAND:", 5) != 0) return 0;
     cursor = line + 5;
     if (!kc_p2p_parse_field(&cursor, type_text, sizeof(type_text), ':'))
         return 0;
-    if (!kc_p2p_parse_field(&cursor, addr, sizeof(addr), ':'))
-        return 0;
+    if (*cursor == '[') {
+        cursor++;
+        end = strchr(cursor, ']');
+        if (!end || end[1] != ':') return 0;
+        addr_len = (size_t)(end - cursor);
+        if (addr_len == 0 || addr_len >= sizeof(addr)) return 0;
+        memcpy(addr, cursor, addr_len);
+        addr[addr_len] = '\0';
+        cursor = end + 2;
+    } else {
+        if (!kc_p2p_parse_field(&cursor, addr, sizeof(addr), ':'))
+            return 0;
+    }
     if (!kc_p2p_parse_field(&cursor, port_text, sizeof(port_text), '\0'))
         return 0;
     if (*cursor != '\0') return 0;
     if (!kc_p2p_parse_candidate_type(type_text, &out->type)) return 0;
-    if (inet_pton(AF_INET, addr, &ipv4) != 1) return 0;
+    if (inet_pton(AF_INET, addr, &ipv4) != 1 &&
+        inet_pton(AF_INET6, addr, &ipv6) != 1)
+        return 0;
     if (!kc_p2p_parse_port_token(port_text, &out->port)) return 0;
     snprintf(out->addr, sizeof(out->addr), "%s", addr);
     out->priority = 0;
@@ -3608,9 +3756,15 @@ static int kc_p2p_append_candidate(char *msg, size_t cap,
     int n;
 
     if (!candidate) return 0;
-    n = snprintf(cbuf, sizeof(cbuf), "CAND:%s:%s:%u\n",
-        kc_p2p_candidate_type_name(candidate->type), candidate->addr,
-        candidate->port);
+    if (strchr(candidate->addr, ':')) {
+        n = snprintf(cbuf, sizeof(cbuf), "CAND:%s:[%s]:%u\n",
+            kc_p2p_candidate_type_name(candidate->type), candidate->addr,
+            candidate->port);
+    } else {
+        n = snprintf(cbuf, sizeof(cbuf), "CAND:%s:%s:%u\n",
+            kc_p2p_candidate_type_name(candidate->type), candidate->addr,
+            candidate->port);
+    }
     if (n < 0 || (size_t)n >= sizeof(cbuf)) return 0;
     return kc_p2p_append_text(msg, cap, cbuf);
 }
@@ -4027,7 +4181,8 @@ static int kc_p2p_stun_binding(kc_p2p_t *ctx, int udp_fd,
     unsigned char tx[4096], rx[4096], tx_id[12], rx_id[12];
     char host[256];
     unsigned short port;
-    struct sockaddr_in srv;
+    struct sockaddr_storage srv;
+    socklen_t srv_len;
     fd_set rfds;
     struct timeval tv;
     int off, rl, n, mt, ao, al;
@@ -4051,14 +4206,15 @@ static int kc_p2p_stun_binding(kc_p2p_t *ctx, int udp_fd,
         port = (unsigned short)atoi(co + 1);
     }
 
-    if (kc_p2p_resolve(host, port, SOCK_DGRAM, &srv) != 0) return -1;
+    if (kc_p2p_resolve(host, port, SOCK_DGRAM, &srv, &srv_len) != 0) return -1;
+    if (srv.ss_family != AF_INET) return -1;
 
     if (!kc_p2p_stun_gen_id(tx_id)) return -1;
     off = kc_p2p_stun_build(tx, KC_P2P_STUN_BINDING, tx_id);
     kc_p2p_stun_len(tx, off);
 
     if (sendto(udp_fd, (const char *)tx, (size_t)off, 0,
-        (const struct sockaddr *)&srv, sizeof(srv)) < 0) return -1;
+        (const struct sockaddr *)&srv, srv_len) < 0) return -1;
 
     FD_ZERO(&rfds); FD_SET(udp_fd, &rfds);
     tv.tv_sec = 3; tv.tv_usec = 0;
@@ -4106,7 +4262,7 @@ int kc_p2p_set_stun_url(kc_p2p_t *ctx, const char *url) {
  */
 int kc_p2p_gather_candidates(kc_p2p_t *ctx, int udp_fd,
     kc_p2p_candidate_t *out, int out_cap, int *out_count) {
-    struct sockaddr_in udp_sa;
+    struct sockaddr_storage udp_sa;
     char stun_ip[KC_P2P_ADDR_MAX + 1];
     unsigned short stun_port;
     socklen_t udp_sa_len = sizeof(udp_sa);
@@ -4115,10 +4271,13 @@ int kc_p2p_gather_candidates(kc_p2p_t *ctx, int udp_fd,
     stun_port = 0;
     *out_count = 0;
     if (getsockname(udp_fd, (struct sockaddr *)&udp_sa, &udp_sa_len) == 0) {
-        unsigned short udp_port = ntohs(udp_sa.sin_port);
+        unsigned short udp_port = kc_p2p_sockaddr_port(&udp_sa);
         if (*out_count < out_cap) {
             out[*out_count].type = KC_P2P_CAND_HOST;
-            strcpy(out[*out_count].addr, "127.0.0.1");
+            if (udp_sa.ss_family == AF_INET6)
+                strcpy(out[*out_count].addr, "::1");
+            else
+                strcpy(out[*out_count].addr, "127.0.0.1");
             out[*out_count].port = udp_port;
             (*out_count)++;
         }
@@ -4166,6 +4325,35 @@ int kc_p2p_gather_candidates(kc_p2p_t *ctx, int udp_fd,
 }
 
 /**
+ * Converts a candidate into a socket address.
+ * @param candidate Candidate to convert.
+ * @param out       Output socket address.
+ * @return 1 on success, 0 on malformed input.
+ */
+static int kc_p2p_candidate_sockaddr(const kc_p2p_candidate_t *candidate,
+    struct sockaddr_storage *out)
+{
+    struct sockaddr_in *v4;
+    struct sockaddr_in6 *v6;
+
+    if (!candidate || !out || candidate->port == 0) return 0;
+    memset(out, 0, sizeof(*out));
+    v4 = (struct sockaddr_in *)out;
+    if (inet_pton(AF_INET, candidate->addr, &v4->sin_addr) == 1) {
+        v4->sin_family = AF_INET;
+        v4->sin_port = htons(candidate->port);
+        return 1;
+    }
+    v6 = (struct sockaddr_in6 *)out;
+    if (inet_pton(AF_INET6, candidate->addr, &v6->sin6_addr) == 1) {
+        v6->sin6_family = AF_INET6;
+        v6->sin6_port = htons(candidate->port);
+        return 1;
+    }
+    return 0;
+}
+
+/**
  * Punch select.
  * Summary: Selects a candidate and performs hole punching.
  * @param ctx                   Context.
@@ -4178,7 +4366,7 @@ int kc_p2p_gather_candidates(kc_p2p_t *ctx, int udp_fd,
  * @param selected_addr          Selected output address.
  * @return 0 on success, -1 on error.
  */
-int kc_p2p_punch_select(kc_p2p_t *ctx, int sweep_limit, int udp_fd, const char *session_id, const char *from_id, const char *to_id, const kc_p2p_candidate_t *remote_candidates, int remote_candidate_count, struct sockaddr_in *selected_addr) {
+int kc_p2p_punch_select(kc_p2p_t *ctx, int sweep_limit, int udp_fd, const char *session_id, const char *from_id, const char *to_id, const kc_p2p_candidate_t *remote_candidates, int remote_candidate_count, struct sockaddr_storage *selected_addr) {
     (void)ctx;
     if (remote_candidate_count <= 0) return KC_P2P_ERROR;
     
@@ -4187,12 +4375,13 @@ int kc_p2p_punch_select(kc_p2p_t *ctx, int sweep_limit, int udp_fd, const char *
     
     for (int i = 0; i < 3; i++) { 
         for (int c = 0; c < remote_candidate_count; c++) {
-            struct sockaddr_in cand_sa;
+            struct sockaddr_storage cand_sa;
+            socklen_t cand_len;
             memset(&cand_sa, 0, sizeof(cand_sa));
-            cand_sa.sin_family = AF_INET;
-            cand_sa.sin_addr.s_addr = inet_addr(remote_candidates[c].addr);
-            cand_sa.sin_port = htons(remote_candidates[c].port);
-            sendto(udp_fd, ping_msg, strlen(ping_msg), 0, (struct sockaddr *)&cand_sa, sizeof(cand_sa));
+            if (!kc_p2p_candidate_sockaddr(&remote_candidates[c], &cand_sa))
+                continue;
+            cand_len = kc_p2p_sockaddr_len(&cand_sa);
+            sendto(udp_fd, ping_msg, strlen(ping_msg), 0, (struct sockaddr *)&cand_sa, cand_len);
         }
         
         fd_set readfds;
@@ -4205,7 +4394,7 @@ int kc_p2p_punch_select(kc_p2p_t *ctx, int sweep_limit, int udp_fd, const char *
         if (select(udp_fd + 1, &readfds, NULL, NULL, &tv) > 0) {
             if (FD_ISSET(udp_fd, &readfds)) {
                 char recv_buf[1024];
-                struct sockaddr_in src_addr;
+                struct sockaddr_storage src_addr;
                 socklen_t src_len = sizeof(src_addr);
                 int n = recvfrom(udp_fd, recv_buf, sizeof(recv_buf) - 1, 0, (struct sockaddr *)&src_addr, &src_len);
                 if (n > 0) {
@@ -4231,7 +4420,7 @@ int kc_p2p_punch_select(kc_p2p_t *ctx, int sweep_limit, int udp_fd, const char *
                         if (is_ping) {
                             char pong_msg[256];
                             snprintf(pong_msg, sizeof(pong_msg), "PUNCH_PONG:%s:%s:%s\n", session_id, to_id, from_id);
-                            sendto(udp_fd, pong_msg, strlen(pong_msg), 0, (struct sockaddr *)&src_addr, sizeof(src_addr));
+                            sendto(udp_fd, pong_msg, strlen(pong_msg), 0, (struct sockaddr *)&src_addr, src_len);
                         }
                         return KC_P2P_OK;
                     }
@@ -4244,22 +4433,27 @@ int kc_p2p_punch_select(kc_p2p_t *ctx, int sweep_limit, int udp_fd, const char *
         for (int sign = -1; sign <= 1; sign += 2) {
             int offset = sweep * sign;
             for (int c = 0; c < remote_candidate_count; c++) {
-                struct sockaddr_in exact_sa;
+                struct sockaddr_storage exact_sa;
+                socklen_t exact_len;
                 memset(&exact_sa, 0, sizeof(exact_sa));
-                exact_sa.sin_family = AF_INET;
-                exact_sa.sin_addr.s_addr = inet_addr(remote_candidates[c].addr);
-                exact_sa.sin_port = htons(remote_candidates[c].port);
-                sendto(udp_fd, ping_msg, strlen(ping_msg), 0, (struct sockaddr *)&exact_sa, sizeof(exact_sa));
+                if (!kc_p2p_candidate_sockaddr(&remote_candidates[c], &exact_sa))
+                    continue;
+                exact_len = kc_p2p_sockaddr_len(&exact_sa);
+                sendto(udp_fd, ping_msg, strlen(ping_msg), 0, (struct sockaddr *)&exact_sa, exact_len);
                 
-                if (remote_candidates[c].type == KC_P2P_CAND_SRFLX || remote_candidates[c].type == KC_P2P_CAND_PUBLIC) {
-                    struct sockaddr_in cand_sa;
+                if (exact_sa.ss_family == AF_INET &&
+                    (remote_candidates[c].type == KC_P2P_CAND_SRFLX || remote_candidates[c].type == KC_P2P_CAND_PUBLIC)) {
+                    struct sockaddr_storage cand_sa;
+                    socklen_t cand_len;
                     memset(&cand_sa, 0, sizeof(cand_sa));
-                    cand_sa.sin_family = AF_INET;
-                    cand_sa.sin_addr.s_addr = inet_addr(remote_candidates[c].addr);
+                    if (!kc_p2p_candidate_sockaddr(&remote_candidates[c], &cand_sa))
+                        continue;
                     int test_port = remote_candidates[c].port + offset;
                     if (test_port > 0 && test_port <= 65535) {
-                        cand_sa.sin_port = htons(test_port);
-                        sendto(udp_fd, ping_msg, strlen(ping_msg), 0, (struct sockaddr *)&cand_sa, sizeof(cand_sa));
+                        kc_p2p_sockaddr_set_port(&cand_sa,
+                            (unsigned short)test_port);
+                        cand_len = kc_p2p_sockaddr_len(&cand_sa);
+                        sendto(udp_fd, ping_msg, strlen(ping_msg), 0, (struct sockaddr *)&cand_sa, cand_len);
                     }
                 }
             }
@@ -4274,7 +4468,7 @@ int kc_p2p_punch_select(kc_p2p_t *ctx, int sweep_limit, int udp_fd, const char *
             if (select(udp_fd + 1, &readfds, NULL, NULL, &tv) > 0) {
                 if (FD_ISSET(udp_fd, &readfds)) {
                     char recv_buf[1024];
-                    struct sockaddr_in src_addr;
+                    struct sockaddr_storage src_addr;
                     socklen_t src_len = sizeof(src_addr);
                     int n = recvfrom(udp_fd, recv_buf, sizeof(recv_buf) - 1, 0, (struct sockaddr *)&src_addr, &src_len);
                     if (n > 0) {
@@ -4300,7 +4494,7 @@ int kc_p2p_punch_select(kc_p2p_t *ctx, int sweep_limit, int udp_fd, const char *
                             if (is_ping) {
                                 char pong_msg[256];
                                 snprintf(pong_msg, sizeof(pong_msg), "PUNCH_PONG:%s:%s:%s\n", session_id, to_id, from_id);
-                                sendto(udp_fd, pong_msg, strlen(pong_msg), 0, (struct sockaddr *)&src_addr, sizeof(src_addr));
+                                sendto(udp_fd, pong_msg, strlen(pong_msg), 0, (struct sockaddr *)&src_addr, src_len);
                             }
                             return KC_P2P_OK;
                         }
@@ -4328,6 +4522,7 @@ int kc_p2p_serve_index(
     kc_p2p_fd_t tcp_fd;
     struct addrinfo hints;
     struct addrinfo *ai;
+    struct addrinfo *it;
     char port_str[16];
     fd_set fds;
     struct timeval tv;
@@ -4338,25 +4533,41 @@ int kc_p2p_serve_index(
         return KC_P2P_ENET;
 
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
+    hints.ai_family = host ? AF_UNSPEC : AF_INET6;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
     snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
     ret = getaddrinfo(host, port_str, &hints, &ai);
+    if (ret != 0 && !host) {
+        hints.ai_family = AF_INET;
+        ret = getaddrinfo(host, port_str, &hints, &ai);
+    }
     if (ret != 0) { kc_p2p_platform_cleanup(); return KC_P2P_ENET; }
-    tcp_fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-    if (KC_P2P_ISERR(tcp_fd)) { freeaddrinfo(ai); kc_p2p_platform_cleanup(); return KC_P2P_ENET; }
-    { int reuse = 1; setsockopt(tcp_fd, SOL_SOCKET, SO_REUSEADDR, (void *)&reuse, sizeof(reuse)); }
-    if (bind(tcp_fd, ai->ai_addr, (socklen_t)ai->ai_addrlen) == SOCKET_ERROR)
-        { KC_P2P_FD_CLOSE(tcp_fd); freeaddrinfo(ai); kc_p2p_platform_cleanup(); return KC_P2P_ENET; }
-    if (listen(tcp_fd, 32) == SOCKET_ERROR)
-        { KC_P2P_FD_CLOSE(tcp_fd); freeaddrinfo(ai); kc_p2p_platform_cleanup(); return KC_P2P_ENET; }
+    tcp_fd = KC_P2P_FD_INVALID;
+    for (it = ai; it; it = it->ai_next) {
+        tcp_fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+        if (KC_P2P_ISERR(tcp_fd)) continue;
+        { int reuse = 1; setsockopt(tcp_fd, SOL_SOCKET, SO_REUSEADDR, (void *)&reuse, sizeof(reuse)); }
+#ifdef IPV6_V6ONLY
+        if (it->ai_family == AF_INET6) {
+            int v6only = 0;
+            setsockopt(tcp_fd, IPPROTO_IPV6, IPV6_V6ONLY,
+                (void *)&v6only, sizeof(v6only));
+        }
+#endif
+        if (bind(tcp_fd, it->ai_addr, (socklen_t)it->ai_addrlen) == 0 &&
+            listen(tcp_fd, 32) == 0)
+            break;
+        KC_P2P_FD_CLOSE(tcp_fd);
+        tcp_fd = KC_P2P_FD_INVALID;
+    }
     freeaddrinfo(ai);
+    if (KC_P2P_ISERR(tcp_fd)) { kc_p2p_platform_cleanup(); return KC_P2P_ENET; }
 
     kc_p2p_set_nonblock(tcp_fd);
 
     fprintf(stderr, "p2p: index server listening on %s:%u\n",
-        host ? host : "0.0.0.0", (unsigned)port);
+        host ? host : "*", (unsigned)port);
 
     while (1) {
         if (kc_p2p_stop_requested) { fprintf(stderr, "p2p: shutdown requested\n"); break; }
@@ -4378,7 +4589,7 @@ int kc_p2p_serve_index(
         if (n == 0) continue;
 
         if (FD_ISSET(tcp_fd, &fds)) {
-            struct sockaddr_in client_addr;
+            struct sockaddr_storage client_addr;
             socklen_t client_len = sizeof(client_addr);
             kc_p2p_fd_t client_fd = accept(tcp_fd, (struct sockaddr *)&client_addr, &client_len);
             if (!KC_P2P_ISERR(client_fd)) {
@@ -4401,7 +4612,7 @@ int kc_p2p_serve_index(
                 nr = kc_p2p_sock_read(c->fd, tmp, (int)sizeof(tmp) - 1);
                 if (nr <= 0) {
                     int cidx;
-                    struct sockaddr_in dead_peer_sa;
+                    struct sockaddr_storage dead_peer_sa;
                     socklen_t dead_peer_len;
 
                     memset(&dead_peer_sa, 0, sizeof(dead_peer_sa));
@@ -4507,7 +4718,7 @@ int kc_p2p_serve_index(
                         }
 
                         if (strcmp(cmd, "REGISTER") == 0) {
-                            struct sockaddr_in peer_sa;
+                            struct sockaddr_storage peer_sa;
                             socklen_t peer_len = sizeof(peer_sa);
 
                             if (getpeername(c->fd, (struct sockaddr *)&peer_sa,
@@ -4907,17 +5118,19 @@ int kc_p2p_wait(
     char recv_buf[KC_P2P_BUF];
     kc_p2p_fd_t udp_fd = KC_P2P_FD_INVALID;
     time_t last_heartbeat;
+    const char *udp_any_host;
 
     (void)bind_port;
     if (!ctx) return KC_P2P_ERROR;
     if (ctx->proto != KC_P2P_PROTO_TCP && ctx->proto != KC_P2P_PROTO_UDP)
         return KC_P2P_ERROR;
     if (ctx->bind_port == 0) return KC_P2P_ERROR;
+    udp_any_host = kc_p2p_host_is_ipv6_literal(index_host) ? "::" : "0.0.0.0";
 
     control_fd = kc_p2p_control_connect(index_host, index_port);
     if (KC_P2P_ISERR(control_fd)) return KC_P2P_ENET;
 
-    udp_fd = kc_p2p_create_socket("0.0.0.0", 0);
+    udp_fd = kc_p2p_create_socket(udp_any_host, 0);
     if (KC_P2P_ISERR(udp_fd)) { KC_P2P_FD_CLOSE(control_fd); return KC_P2P_ENET; }
 
     snprintf(send_buf, sizeof(send_buf), "REGISTER:%s", self_id);
@@ -5092,7 +5305,7 @@ int kc_p2p_wait(
                             continue;
                         kc_p2p_tcp_send(control_fd, ack_buf);
                         
-                        struct sockaddr_in peer;
+                        struct sockaddr_storage peer;
                         memset(&peer, 0, sizeof(peer));
                         if (kc_p2p_punch_select(ctx, ctx->sweep, udp_fd, ack_sess,
                             self_id, conn_id, remote_cands, remote_cand_count,
@@ -5102,8 +5315,8 @@ int kc_p2p_wait(
                         int found = -1;
                         for (i = 0; i < n_sessions; i++) {
                             if (!sessions[i].active) continue;
-                            if (sessions[i].peer_addr.sin_port == peer.sin_port &&
-                                sessions[i].peer_addr.sin_addr.s_addr == peer.sin_addr.s_addr) {
+                            if (kc_p2p_sockaddr_equal(&sessions[i].peer_addr,
+                                &peer)) {
                                 found = i; break;
                             }
                         }
@@ -5130,7 +5343,7 @@ int kc_p2p_wait(
                                     continue;
                                 }
                             } else {
-                                sess.backend_fd = kc_p2p_create_socket("0.0.0.0", 0);
+                                sess.backend_fd = kc_p2p_create_socket(udp_any_host, 0);
                                 if (KC_P2P_ISERR(sess.backend_fd)) continue;
                             }
                             sess.active = 1;
@@ -5149,11 +5362,11 @@ int kc_p2p_wait(
                             }
                             sessions[n_sessions++] = sess;
 
-                            sendto(udp_fd, "P2P_PUNCH:server", 16, 0,
-                                (const struct sockaddr *)&peer, sizeof(peer));
+                            kc_p2p_sendto_addr(udp_fd, "P2P_PUNCH:server", 16,
+                                &peer);
                         } else {
-                            sendto(udp_fd, "P2P_PUNCH:server", 16, 0,
-                                (const struct sockaddr *)&peer, sizeof(peer));
+                            kc_p2p_sendto_addr(udp_fd, "P2P_PUNCH:server", 16,
+                                &peer);
                         }
                     }
                 }
@@ -5161,7 +5374,7 @@ int kc_p2p_wait(
 
             if (FD_ISSET(udp_fd, &fds)) {
                 char buf[KC_P2P_BUF];
-                struct sockaddr_in from;
+                struct sockaddr_storage from;
                 socklen_t fromlen = sizeof(from);
                 n = (int)recvfrom(udp_fd, buf, sizeof(buf), 0,
                     (struct sockaddr *)&from, &fromlen);
@@ -5171,8 +5384,8 @@ int kc_p2p_wait(
                     int found = -1;
                     for (i = 0; i < n_sessions; i++) {
                         if (!sessions[i].active) continue;
-                        if (sessions[i].peer_addr.sin_port == from.sin_port &&
-                            sessions[i].peer_addr.sin_addr.s_addr == from.sin_addr.s_addr) {
+                        if (kc_p2p_sockaddr_equal(&sessions[i].peer_addr,
+                            &from)) {
                             found = i; break;
                         }
                     }
@@ -5215,20 +5428,19 @@ int kc_p2p_wait(
                             snprintf(pong, sizeof(pong), "PUNCH_PONG:%s:%s:%s",
                                 ping_sess, ping_to, ping_from);
                             sendto(udp_fd, pong, strlen(pong), 0,
-                                (const struct sockaddr *)&from, sizeof(from));
+                                (const struct sockaddr *)&from, fromlen);
                         }
                     } else {
                         int unset = -1;
                         for (i = 0; i < n_sessions; i++) {
                             if (!sessions[i].active) continue;
-                            if (sessions[i].peer_addr.sin_port == 0) { unset = i; break; }
+                            if (kc_p2p_sockaddr_port(&sessions[i].peer_addr) == 0) { unset = i; break; }
                         }
                         if (unset >= 0) {
                             sessions[unset].peer_addr = from;
                             sessions[unset].last_rx = time(NULL);
                             sessions[unset].last_ka = sessions[unset].last_rx;
-                            sendto(udp_fd, buf, (size_t)n, 0,
-                                (const struct sockaddr *)&from, sizeof(from));
+                            kc_p2p_sendto_addr(udp_fd, buf, (size_t)n, &from);
                             if (strncmp(buf, "P2P_PUNCH:", 10) != 0 &&
                                 strncmp(buf, "P2P_KA:", 7) != 0) {
                                 if (sessions[unset].is_tcp) {
@@ -5253,8 +5465,7 @@ int kc_p2p_wait(
                                 }
                             }
                         } else if (strncmp(buf, "P2P_PUNCH:", 10) == 0) {
-                            sendto(udp_fd, buf, (size_t)n, 0,
-                                (const struct sockaddr *)&from, sizeof(from));
+                            kc_p2p_sendto_addr(udp_fd, buf, (size_t)n, &from);
                         }
                     }
                 }
@@ -5279,9 +5490,8 @@ int kc_p2p_wait(
                     n = (int)recvfrom(sessions[i].backend_fd, buf, sizeof(buf), 0,
                         (struct sockaddr *)&bfrom, &bfromlen);
                     if (n > 0) {
-                        sendto(udp_fd, buf, (size_t)n, 0,
-                            (const struct sockaddr *)&sessions[i].peer_addr,
-                            sizeof(sessions[i].peer_addr));
+                        kc_p2p_sendto_addr(udp_fd, buf, (size_t)n,
+                            &sessions[i].peer_addr);
                         sessions[i].last_rx = time(NULL);
                     }
                 }
@@ -5302,9 +5512,8 @@ int kc_p2p_wait(
                     }
                 }
                 if (time(NULL) - sessions[i].last_ka > KC_P2P_KEEPALIVE_S) {
-                    sendto(udp_fd, "P2P_KA:", 7, 0,
-                        (const struct sockaddr *)&sessions[i].peer_addr,
-                        sizeof(sessions[i].peer_addr));
+                kc_p2p_sendto_addr(udp_fd, "P2P_KA:", 7,
+                    &sessions[i].peer_addr);
                     sessions[i].last_ka = time(NULL);
                 }
                 if (time(NULL) - sessions[i].last_rx > KC_P2P_DISCONNECT_S) {
@@ -5427,10 +5636,10 @@ static int kc_p2p_open_udp_session_cands(
     kc_p2p_candidate_t *remote_cands,
     int remote_cand_count,
     kc_p2p_fd_t *out_fd,
-    struct sockaddr_in *out_peer,
+    struct sockaddr_storage *out_peer,
     kc_p2p_udp_consumer_session_t *sess)
 {
-    struct sockaddr_in peer_addr;
+    struct sockaddr_storage peer_addr;
     memset(&peer_addr, 0, sizeof(peer_addr));
 
     int rc = kc_p2p_punch_select(ctx, sweep_limit, fd, session_id ? session_id : "0", self_id, target_id, remote_cands, remote_cand_count, &peer_addr);
@@ -5469,19 +5678,21 @@ int kc_p2p_connect(
     kc_p2p_fd_t local_fd;
     kc_p2p_fd_t tcp_listen_fd;
     kc_p2p_udp_consumer_session_t *sessions;
+    const char *udp_any_host;
     int n_sessions, cap_sessions;
 
     (void)bind_port;
     if (!ctx) return KC_P2P_ERROR;
     if (ctx->bind_port == 0) return KC_P2P_ERROR;
     if (kc_p2p_platform_init() != 0) return KC_P2P_ENET;
+    udp_any_host = kc_p2p_host_is_ipv6_literal(index_host) ? "::" : "0.0.0.0";
 
     if (ctx->proto == KC_P2P_PROTO_UDP) {
         local_fd = kc_p2p_create_socket("127.0.0.1", ctx->bind_port);
         if (KC_P2P_ISERR(local_fd)) { kc_p2p_platform_cleanup(); return KC_P2P_ENET; }
         tcp_listen_fd = KC_P2P_FD_INVALID;
     } else {
-        local_fd = kc_p2p_create_socket("0.0.0.0", 0);
+        local_fd = kc_p2p_create_socket(udp_any_host, 0);
         if (KC_P2P_ISERR(local_fd)) { kc_p2p_platform_cleanup(); return KC_P2P_ENET; }
         tcp_listen_fd = kc_p2p_create_tcp_listener("127.0.0.1", ctx->bind_port);
         if (KC_P2P_ISERR(tcp_listen_fd)) {
@@ -5574,7 +5785,7 @@ int kc_p2p_connect(
                         continue;
                     }
                     
-                    int temp_udp = kc_p2p_create_socket("0.0.0.0", 0);
+                    int temp_udp = kc_p2p_create_socket(udp_any_host, 0);
                     kc_p2p_gather_candidates(ctx, temp_udp, cands,
                         KC_P2P_CANDIDATES_MAX, &cand_count);
                     
@@ -5634,7 +5845,7 @@ int kc_p2p_connect(
             }
         } else if (FD_ISSET(local_fd, &fds)) {
             char buf[KC_P2P_BUF];
-            struct sockaddr_in from;
+            struct sockaddr_storage from;
             socklen_t fromlen = sizeof(from);
             int found;
 
@@ -5644,8 +5855,8 @@ int kc_p2p_connect(
                 found = -1;
                 for (i = 0; i < n_sessions; i++) {
                     if (!sessions[i].active) continue;
-                    if (sessions[i].client_addr.sin_port == from.sin_port &&
-                        sessions[i].client_addr.sin_addr.s_addr == from.sin_addr.s_addr) {
+                    if (kc_p2p_sockaddr_equal(&sessions[i].client_addr,
+                        &from)) {
                         found = i; break;
                     }
                 }
@@ -5669,7 +5880,7 @@ int kc_p2p_connect(
                             goto udp_skip;
                         }
                         
-                        int temp_udp = kc_p2p_create_socket("0.0.0.0", 0);
+                        int temp_udp = kc_p2p_create_socket(udp_any_host, 0);
                         kc_p2p_gather_candidates(ctx, temp_udp, cands,
                             KC_P2P_CANDIDATES_MAX, &cand_count);
                         
@@ -5702,9 +5913,8 @@ int kc_p2p_connect(
                 }
 udp_skip:
                 if (found >= 0) {
-                    sendto(sessions[found].fd, buf, (size_t)n, 0,
-                        (const struct sockaddr *)&sessions[found].peer_addr,
-                        sizeof(sessions[found].peer_addr));
+                    kc_p2p_sendto_addr(sessions[found].fd, buf, (size_t)n,
+                        &sessions[found].peer_addr);
                     sessions[found].last_rx = time(NULL);
                 }
             }
@@ -5714,7 +5924,7 @@ udp_skip:
             if (!sessions[i].active) continue;
             if (!FD_ISSET(sessions[i].fd, &fds)) continue;
             char buf[KC_P2P_BUF];
-            struct sockaddr_in from;
+            struct sockaddr_storage from;
             socklen_t fromlen = sizeof(from);
             n = (int)recvfrom(sessions[i].fd, buf, sizeof(buf), 0,
                 (struct sockaddr *)&from, &fromlen);
@@ -5735,9 +5945,8 @@ udp_skip:
                             kc_p2p_consumer_session_close(&sessions[i]);
                         }
                     } else {
-                        sendto(local_fd, buf, (size_t)n, 0,
-                            (const struct sockaddr *)&sessions[i].client_addr,
-                            sizeof(sessions[i].client_addr));
+                        kc_p2p_sendto_addr(local_fd, buf, (size_t)n,
+                            &sessions[i].client_addr);
                     }
                     sessions[i].last_rx = time(NULL);
                 }
@@ -5759,9 +5968,8 @@ udp_skip:
                 }
             }
             if (time(NULL) - sessions[i].last_ka > KC_P2P_KEEPALIVE_S) {
-                sendto(sessions[i].fd, "P2P_KA:", 7, 0,
-                    (const struct sockaddr *)&sessions[i].peer_addr,
-                    sizeof(sessions[i].peer_addr));
+                kc_p2p_sendto_addr(sessions[i].fd, "P2P_KA:", 7,
+                    &sessions[i].peer_addr);
                 sessions[i].last_ka = time(NULL);
             }
             if (time(NULL) - sessions[i].last_rx > KC_P2P_DISCONNECT_S) {

@@ -42,8 +42,8 @@ static void kc_p2p_signal_cb(kc_p2p_t *ctx) {
 }
 
 /**
- * Parses host:port from a string.
- * Summary: Splits on last colon, uses KC_P2P_PORT_DEFAULT if no colon.
+ * Parses host and optional port from a string.
+ * Summary: Supports host, host:port, IPv4:port, [IPv6], and [IPv6]:port.
  * @param text     Input address string.
  * @param host     Output host buffer.
  * @param host_sz  Output host buffer capacity.
@@ -54,13 +54,34 @@ static int parse_addr(const char *text, char *host, size_t host_sz,
     unsigned short *port)
 {
     const char *colon;
+    const char *end_bracket;
     char *end;
     unsigned long val;
     size_t n;
 
     if (!text || !text[0] || !host || host_sz == 0 || !port) return 1;
-    colon = strrchr(text, ':');
     *port = KC_P2P_PORT_DEFAULT;
+    if (text[0] == '[') {
+        end_bracket = strchr(text, ']');
+        if (!end_bracket) return 1;
+        n = (size_t)(end_bracket - text - 1);
+        if (n == 0 || n >= host_sz) return 1;
+        memcpy(host, text + 1, n);
+        host[n] = '\0';
+        if (end_bracket[1] == '\0') return 0;
+        if (end_bracket[1] != ':' || end_bracket[2] == '\0') return 1;
+        val = strtoul(end_bracket + 2, &end, 10);
+        if (*end != '\0' || val == 0 || val > 65535) return 1;
+        *port = (unsigned short)val;
+        return 0;
+    }
+    colon = strrchr(text, ':');
+    if (colon && strchr(text, ':') != colon) {
+        n = strlen(text);
+        if (n == 0 || n >= host_sz) return 1;
+        memcpy(host, text, n + 1);
+        return 0;
+    }
     if (!colon) {
         n = strlen(text);
         if (n == 0 || n >= host_sz) return 1;
@@ -73,7 +94,7 @@ static int parse_addr(const char *text, char *host, size_t host_sz,
     memcpy(host, text, n);
     host[n] = '\0';
     val = strtoul(colon + 1, &end, 10);
-    if (*end != '\0' || val > 65535) return 1;
+    if (*end != '\0' || val == 0 || val > 65535) return 1;
     *port = (unsigned short)val;
     return 0;
 }
@@ -221,7 +242,7 @@ int main(int argc, char **argv) {
         kc_p2p_listen_signal(ctx, SIGINT);
         kc_p2p_listen_signal(ctx, SIGTERM);
 
-        ret = kc_p2p_serve_index(ctx, "0.0.0.0", port);
+        ret = kc_p2p_serve_index(ctx, NULL, port);
         fprintf(stderr, "p2p: index exited: %s\n", kc_p2p_strerror(ret));
         exit_code = ret == KC_P2P_OK ? 0 : 1;
         kc_p2p_close(ctx);

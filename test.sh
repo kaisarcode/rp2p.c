@@ -1,6 +1,6 @@
 #!/bin/sh
 # test.sh
-# Summary: Validation suite for p2p TCP publish and consume mode.
+# Summary: Validation suite for rp2p TCP publish and consume mode.
 # Author:  KaisarCode
 # Website: https://kaisarcode.com
 # License: https://www.gnu.org/licenses/gpl-3.0.html
@@ -34,7 +34,7 @@ kc_test_pass() {
 # Verifies build artifacts exist. Silent prerequisite, not a test.
 # @return 0 on success.
 kc_test_ensure_binary() {
-    if [ ! -x "$BIN" ]; then printf 'prerequisite: p2p not found at %s\n' "$BIN" >&2; return 1; fi
+    if [ ! -x "$BIN" ]; then printf 'prerequisite: rp2p not found at %s\n' "$BIN" >&2; return 1; fi
     if [ ! -f "bin/x86_64/linux/librp2p.a" ]; then printf 'prerequisite: librp2p.a not found\n' >&2; return 1; fi
     if [ ! -f "bin/x86_64/linux/librp2p.so" ]; then printf 'prerequisite: librp2p.so not found\n' >&2; return 1; fi
     return 0

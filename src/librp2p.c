@@ -77,7 +77,7 @@ typedef int rp2p_fd_t;
 #define RP2P_PUNCH_INTERVAL_MS 200
 #define RP2P_CANDIDATES_MAX       16
 #define RP2P_MAX_PENDING_PUNCHES  32
-#define RRP2P_POW_CHALLENGES_MAX 256
+#define RP2P_POW_CHALLENGES_MAX 256
 #define RP2P_STREAM_MAGIC      0x48535452u
 #define RP2P_STREAM_VERSION    1u
 #define RP2P_STREAM_SESSION_ID_SZ 16
@@ -578,7 +578,7 @@ typedef struct {
 
 typedef struct {
     char id[RP2P_ID_MAX + 1];
-    char pass[RRP2P_PASS_MAX + 1];
+    char pass[RP2P_PASS_MAX + 1];
 } rp2p_vip_entry_t;
 
 /**
@@ -609,12 +609,12 @@ struct rp2p {
     int n_vips;
     int vips_cap;
     char key[RP2P_KEY_STR_SZ];
-    char pass[RRP2P_PASS_MAX + 1];
+    char pass[RP2P_PASS_MAX + 1];
     int pow_bits;
     unsigned short bind_port;
     int proto;
     int sweep;
-    rp2p_pow_challenge_t pow_challenges[RRP2P_POW_CHALLENGES_MAX];
+    rp2p_pow_challenge_t pow_challenges[RP2P_POW_CHALLENGES_MAX];
     int n_pow_challenges;
 #ifdef _WIN32
     CRITICAL_SECTION mutex;
@@ -2686,7 +2686,7 @@ int rp2p_is_valid_pass_token(const char *pass) {
 
     if (!pass || !pass[0]) return 0;
     for (i = 0; pass[i]; i++) {
-        if (i >= RRP2P_PASS_MAX) return 0;
+        if (i >= RP2P_PASS_MAX) return 0;
         if (!rp2p_is_pass_char(pass[i])) return 0;
     }
     return 1;
@@ -2819,8 +2819,8 @@ static int rp2p_add_vip(rp2p_t *ctx, const char *id, const char *pass,
     }
     strncpy(ctx->vips[ctx->n_vips].id, id, RP2P_ID_MAX);
     ctx->vips[ctx->n_vips].id[RP2P_ID_MAX] = '\0';
-    strncpy(ctx->vips[ctx->n_vips].pass, pass, RRP2P_PASS_MAX);
-    ctx->vips[ctx->n_vips].pass[RRP2P_PASS_MAX] = '\0';
+    strncpy(ctx->vips[ctx->n_vips].pass, pass, RP2P_PASS_MAX);
+    ctx->vips[ctx->n_vips].pass[RP2P_PASS_MAX] = '\0';
     ctx->n_vips++;
     return RP2P_OK;
 }
@@ -2994,8 +2994,8 @@ void rp2p_options_load_env(rp2p_options_t *opts) {
 
     val = getenv("RP2P_PASS");
     if (val) {
-        strncpy(opts->pass, val, RRP2P_PASS_MAX);
-        opts->pass[RRP2P_PASS_MAX] = '\0';
+        strncpy(opts->pass, val, RP2P_PASS_MAX);
+        opts->pass[RP2P_PASS_MAX] = '\0';
     }
 
     val = getenv("RP2P_VIP");
@@ -3111,8 +3111,8 @@ int rp2p_set_sweep(rp2p_t *ctx, int sweep) {
 int rp2p_set_pass(rp2p_t *ctx, const char *pass) {
     if (!ctx || !pass) return RP2P_ERROR;
     if (pass[0] && !rp2p_is_valid_pass_token(pass)) return RP2P_ERROR;
-    strncpy(ctx->pass, pass, RRP2P_PASS_MAX);
-    ctx->pass[RRP2P_PASS_MAX] = '\0';
+    strncpy(ctx->pass, pass, RP2P_PASS_MAX);
+    ctx->pass[RP2P_PASS_MAX] = '\0';
     return RP2P_OK;
 }
 
@@ -3377,7 +3377,7 @@ static int rp2p_store_pow_challenge(rp2p_t *ctx,
 
     idx = rp2p_find_pow_challenge(ctx, peer_sa);
     if (idx < 0) {
-        if (ctx->n_pow_challenges >= RRP2P_POW_CHALLENGES_MAX) return 0;
+        if (ctx->n_pow_challenges >= RP2P_POW_CHALLENGES_MAX) return 0;
         idx = ctx->n_pow_challenges++;
     }
     nonce_len = strlen(nonce_hex);
@@ -4259,7 +4259,7 @@ static int rp2p_parse_punch_packet(const char *text, const char *prefix,
         rp2p_is_punch_id(to_id);
 }
 
-#define RRP2P_STUN_ATTR_DATA 0x0013
+#define RP2P_STUN_ATTR_DATA 0x0013
 
 /**
  * STUN put16.
@@ -4305,7 +4305,7 @@ static int rp2p_stun_hdr(const unsigned char *buf, int len, unsigned char id[12]
     if (len < 20) return -1;
     uint32_t mg = ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) |
         ((uint32_t)buf[6] << 8) | buf[7];
-    if (mg != RRP2P_STUN_MAGIC) return -1;
+    if (mg != RP2P_STUN_MAGIC) return -1;
     int msg_len = (buf[2] << 8) | buf[3];
     if (msg_len & 3) return -1;
     if (20 + msg_len > len) return -1;
@@ -4344,8 +4344,8 @@ static int rp2p_stun_rd_xaddr(const unsigned char *buf, int o, int al,
     unsigned short xp = ((unsigned short)buf[o + 2] << 8) | buf[o + 3];
     uint32_t xa = ((uint32_t)buf[o + 4] << 24) | ((uint32_t)buf[o + 5] << 16) |
         ((uint32_t)buf[o + 6] << 8) | buf[o + 7];
-    *port = xp ^ (unsigned short)(RRP2P_STUN_MAGIC >> 16);
-    uint32_t a = xa ^ RRP2P_STUN_MAGIC;
+    *port = xp ^ (unsigned short)(RP2P_STUN_MAGIC >> 16);
+    uint32_t a = xa ^ RP2P_STUN_MAGIC;
     snprintf(addr, (size_t)acap, "%u.%u.%u.%u",
         (unsigned)(a >> 24) & 0xff, (unsigned)(a >> 16) & 0xff,
         (unsigned)(a >> 8) & 0xff, (unsigned)(a & 0xff));
@@ -4355,7 +4355,7 @@ static int rp2p_stun_rd_xaddr(const unsigned char *buf, int o, int al,
 /**
  * STUN binding.
  * Summary: Sends Binding Request and returns srflx ip:port for udp_fd.
- * @param ctx      P2P context.
+ * @param ctx      RP2P context.
  * @param udp_fd   Bound UDP socket.
  * @param out_ip   Output address buffer.
  * @param out_cap  Output address buffer size.
@@ -4403,7 +4403,7 @@ static int rp2p_stun_binding(rp2p_t *ctx, int udp_fd,
     if (srv.ss_family != AF_INET) return -1;
 
     if (!rp2p_stun_gen_id(tx_id)) return -1;
-    off = rp2p_stun_build(tx, RRP2P_STUN_BINDING, tx_id);
+    off = rp2p_stun_build(tx, RP2P_STUN_BINDING, tx_id);
     rp2p_stun_len(tx, off);
 
     if (sendto(udp_fd, (const char *)tx, (size_t)off, 0,
@@ -4417,10 +4417,10 @@ static int rp2p_stun_binding(rp2p_t *ctx, int udp_fd,
     if (rl < 20) return -1;
 
     mt = rp2p_stun_hdr(rx, rl, rx_id);
-    if (mt != RRP2P_STUN_BINDING_RESP) return -1;
+    if (mt != RP2P_STUN_BINDING_RESP) return -1;
     if (memcmp(tx_id, rx_id, sizeof(tx_id)) != 0) return -1;
 
-    ao = rp2p_stun_find(rx, rl, RRP2P_STUN_ATTR_XOR_MAPPED_ADDR, &al);
+    ao = rp2p_stun_find(rx, rl, RP2P_STUN_ATTR_XOR_MAPPED_ADDR, &al);
     if (ao < 0) return -1;
     if (rp2p_stun_rd_xaddr(rx, ao, al, tx_id, out_ip, out_cap, out_port) != 0)
         return -1;
@@ -5030,7 +5030,7 @@ int rp2p_serve_index(
                                 } else {
                                     rp2p_tcp_send(c->fd, "ERROR:not registered");
                                 }
-                            } else if (ctx->n_pow_challenges >= RRP2P_POW_CHALLENGES_MAX &&
+                            } else if (ctx->n_pow_challenges >= RP2P_POW_CHALLENGES_MAX &&
                                 rp2p_find_pow_challenge(ctx, &peer_sa) < 0)
                             {
                                 rp2p_tcp_send(c->fd, "ERROR:busy");

@@ -1,5 +1,5 @@
-# p2p — KaisarCode P2P
-# KaisarCode — CMake build configuration
+# rp2p - RedP2P
+# KaisarCode - CMake build configuration
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 cmake_minimum_required(VERSION 3.14)
@@ -24,7 +24,7 @@ set(RP2P_SOURCES
 )
 
 set_source_files_properties(src/librp2p.c PROPERTIES
-    COMPILE_DEFINITIONS RRP2P_BUILD_VERSION=${RP2P_BUILD_VERSION}
+    COMPILE_DEFINITIONS RP2P_BUILD_VERSION=${RP2P_BUILD_VERSION}
 )
 
 add_library(rp2p_shared SHARED ${RP2P_SOURCES})
@@ -36,7 +36,7 @@ add_library(rp2p_static STATIC ${RP2P_SOURCES})
 set_target_properties(rp2p_static PROPERTIES OUTPUT_NAME "rp2p")
 target_include_directories(rp2p_static PRIVATE src lib/monocypher)
 
-# Binary: p2p
+# Binary: rp2p
 add_executable(rp2p src/rp2p.c ${RP2P_SOURCES})
 target_include_directories(rp2p PRIVATE src lib/monocypher)
 

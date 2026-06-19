@@ -251,7 +251,7 @@ UDP is used only between peers for hole-punch probes, keepalives, and direct pay
 | forwarded by index | `PUNCH_CALL2:me:session\nCAND:...\nEND` to target |
 | `PUNCH_PING:...` | Direct peer STUN-like probe (UDP) |
 | `PUNCH_PONG:...` | Direct peer STUN-like reply (UDP) |
-| `RRP2P_KA:` | UDP keepalive over direct path |
+| `RP2P_KA:` | UDP keepalive over direct path |
 
 ### TCP Stream Layer
 

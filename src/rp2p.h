@@ -36,21 +36,21 @@ typedef struct rp2p rp2p_t;
 #define RP2P_HEARTBEAT_S     15
 #define RP2P_KEY_SZ          16
 #define RP2P_KEY_STR_SZ      33
-#define RRP2P_PASS_MAX       255
+#define RP2P_PASS_MAX       255
 
 #define RP2P_PROTO_TCP 1
 #define RP2P_PROTO_UDP 2
 
-#define RRP2P_STUN_MAGIC 0x2112A442
-#define RRP2P_STUN_ATTR_MAPPED_ADDR     0x0001
-#define RRP2P_STUN_ATTR_XOR_MAPPED_ADDR 0x0020
-#define RRP2P_STUN_BINDING      0x0001
-#define RRP2P_STUN_BINDING_RESP 0x0101
+#define RP2P_STUN_MAGIC 0x2112A442
+#define RP2P_STUN_ATTR_MAPPED_ADDR     0x0001
+#define RP2P_STUN_ATTR_XOR_MAPPED_ADDR 0x0020
+#define RP2P_STUN_BINDING      0x0001
+#define RP2P_STUN_BINDING_RESP 0x0101
 
 typedef struct rp2p_options {
     int seats;
     int pow;
-    char pass[RRP2P_PASS_MAX + 1];
+    char pass[RP2P_PASS_MAX + 1];
     char *vip;
     char index_host[256];
     unsigned short index_port;
@@ -165,7 +165,7 @@ unsigned short bind_port
 
 /**
  * CLIENT: Deregister from an index server over TCP.
- * Used by `p2p del` and internally on shutdown.
+ * Used by `rp2p del` and internally on shutdown.
  * @return RP2P_OK on success, or a negative error code.
  */
 int rp2p_deregister(

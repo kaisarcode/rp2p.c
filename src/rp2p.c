@@ -1,6 +1,6 @@
 /**
  * rp2p.c - RedP2P.
- * Summary: P2P tunnel CLI - idx, set, del, con.
+ * Summary: RP2P tunnel CLI - idx, set, del, con.
  *
  * Author:  KaisarCode
  * Website: https://kaisarcode.com

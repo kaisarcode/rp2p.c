@@ -94,6 +94,8 @@ typedef int kc_p2p_fd_t;
 #define KC_P2P_STREAM_HELLO_MS   500
 #define KC_P2P_STREAM_IDLE_MS    20000
 #define KC_P2P_STREAM_MAX_RETRIES 12
+#define KC_P2P_STREAM_RTO_BACKOFF_SHIFT 4
+#define KC_P2P_STREAM_MAX_BURST          16
 #define KC_P2P_PUNCH_DIRECT_ROUNDS 3
 #define KC_P2P_PUNCH_DIRECT_WAIT_MS 500
 #define KC_P2P_PUNCH_SWEEP_WAIT_MS 20
@@ -1669,6 +1671,7 @@ static int kc_p2p_stream_process_packet(kc_p2p_t *ctx, kc_p2p_fd_t fd,
             KC_P2P_STREAM_TYPE_FIN_ACK, 0,
             0, 0) != 0)
             return -1;
+        st->in.remote_fin_acked = 1;
     } else if (kc_p2p_now_ms() - st->last_ack_ms >= KC_P2P_STREAM_ACK_MS) {
         if (kc_p2p_stream_send_control(ctx, fd, peer_addr, st,
             KC_P2P_STREAM_TYPE_ACK, 0,
@@ -1690,6 +1693,17 @@ static int kc_p2p_stream_pump_tcp(kc_p2p_t *ctx, kc_p2p_fd_t fd,
     int n;
 
     if (!kc_p2p_stream_can_send_data(st)) return 0;
+    {
+        int has_rexmit = 0, j;
+        for (j = 0; j < KC_P2P_STREAM_SEND_WINDOW; j++) {
+            if (st->out.slots[j].used && st->out.slots[j].attempts > 2) {
+                has_rexmit = 1;
+                break;
+            }
+        }
+        if (has_rexmit && kc_p2p_stream_inflight(st) >= KC_P2P_STREAM_SEND_WINDOW / 2)
+            return 0;
+    }
     n = kc_p2p_sock_read(tcp_fd, (char *)buf, (int)sizeof(buf));
     if (n < 0) {
         if (KC_P2P_LASTERR() == KC_P2P_EWOULD) return 0;
@@ -1720,6 +1734,7 @@ static int kc_p2p_stream_tick(kc_p2p_t *ctx, kc_p2p_fd_t fd,
 {
     uint64_t now = kc_p2p_now_ms();
     int i;
+    int burst = 0;
 
     if (!st->enabled) return 0;
     if (!st->hello_sent || (!st->ready && now - st->last_hello_ms >= KC_P2P_STREAM_HELLO_MS)) {
@@ -1727,19 +1742,32 @@ static int kc_p2p_stream_tick(kc_p2p_t *ctx, kc_p2p_fd_t fd,
             KC_P2P_STREAM_TYPE_HELLO);
     }
 
-    for (i = 0; i < KC_P2P_STREAM_SEND_WINDOW; i++) {
+    for (i = 0; i < KC_P2P_STREAM_SEND_WINDOW && burst < KC_P2P_STREAM_MAX_BURST; i++) {
         kc_p2p_stream_send_slot_t *slot = &st->out.slots[i];
         if (!slot->used) continue;
-        if (now - slot->last_tx_ms < KC_P2P_STREAM_RTO_MS) continue;
-        if (slot->attempts >= KC_P2P_STREAM_MAX_RETRIES) return -1;
-        kc_p2p_stream_log("p2p: stream retransmit seq=%u\n",
-            (unsigned)slot->seq);
+        {
+            int shift = slot->attempts > 1 ? slot->attempts - 2 : 0;
+            unsigned int backoff;
+            if (shift > KC_P2P_STREAM_RTO_BACKOFF_SHIFT)
+                shift = KC_P2P_STREAM_RTO_BACKOFF_SHIFT;
+            backoff = 1u << shift;
+            if (now - slot->last_tx_ms < KC_P2P_STREAM_RTO_MS * backoff)
+                continue;
+        }
+        if (slot->attempts >= KC_P2P_STREAM_MAX_RETRIES) {
+            kc_p2p_stream_log("p2p: stream retransmit exhausted seq=%u\n",
+                (unsigned)slot->seq);
+            return -1;
+        }
+        kc_p2p_stream_log("p2p: stream retransmit seq=%u attempt=%d\n",
+            (unsigned)slot->seq, slot->attempts + 1);
         if (kc_p2p_stream_send_raw(ctx, fd, peer_addr, slot->frame,
             slot->frame_len) != 0)
             return -1;
         slot->attempts++;
         slot->last_tx_ms = now;
         st->last_tx_ms = now;
+        burst++;
     }
 
     if (st->ready && now - st->last_ack_ms >= KC_P2P_STREAM_ACK_MS) {
@@ -1750,6 +1778,14 @@ static int kc_p2p_stream_tick(kc_p2p_t *ctx, kc_p2p_fd_t fd,
     }
     if (st->ready && now - st->last_rx_ms >= KC_P2P_STREAM_IDLE_MS)
         return -1;
+    if (st->ready && st->out.fin_acked && !st->in.remote_fin) {
+        if (now - st->last_tx_ms >= (uint64_t)KC_P2P_HALFCLOSE_S * 1000u)
+            return -1;
+    }
+    if (st->ready && st->in.remote_fin_acked && !st->out.local_eof) {
+        if (now - st->last_rx_ms >= (uint64_t)KC_P2P_HALFCLOSE_S * 1000u)
+            return -1;
+    }
     return 0;
 }
 

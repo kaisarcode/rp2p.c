@@ -939,6 +939,46 @@ kc_test_auth_register() {
     return 0
 }
 
+# Verifies moderate DATA frame loss with 1 MiB transfer.
+# @return 0 on success, 1 on failure.
+kc_test_tcp_loss_moderate() {
+    port=$1
+    host=$2
+    backend_port=$3
+    listen_port=$4
+    pass_key=$5
+    in="$TMP_ROOT/loss-moderate.in"
+    out="$TMP_ROOT/loss-moderate.out"
+
+    dd if=/dev/urandom of="$in" bs=131072 count=1 status=none || return 1
+    kc_test_tcp_start "$backend_port" || return 1
+    if [ -n "$pass_key" ]; then
+        P2P_PASS="$pass_key" P2P_DEBUG_STREAM_DROP_EVERY=7 "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/loss-moderate-set.log" 2>&1 &
+    else
+        P2P_DEBUG_STREAM_DROP_EVERY=7 "$BIN" set "${host}@127.0.0.1:${port}" --tcp "$backend_port" > "$TMP_ROOT/loss-moderate-set.log" 2>&1 &
+    fi
+    spid=$!
+    sleep 2
+    P2P_DEBUG_STREAM_DROP_EVERY=7 "$BIN" con "${host}@127.0.0.1:${port}" --tcp "$listen_port" > "$TMP_ROOT/loss-moderate-con.log" 2>&1 &
+    cpid=$!
+    sleep 2
+
+    if ! socat -t 120 - TCP:127.0.0.1:"$listen_port" < "$in" > "$out" 2>/dev/null; then
+        kill -9 "$spid" "$cpid" "$HPID" 2>/dev/null
+        wait "$spid" "$cpid" "$HPID" 2>/dev/null
+        kc_test_fail "tcp-loss-moderate-$host"; return 1
+    fi
+    if ! cmp -s "$in" "$out"; then
+        kill -9 "$spid" "$cpid" "$HPID" 2>/dev/null
+        wait "$spid" "$cpid" "$HPID" 2>/dev/null
+        kc_test_fail "tcp-loss-moderate-$host"; return 1
+    fi
+
+    kill -9 "$spid" "$cpid" "$HPID" 2>/dev/null
+    wait "$spid" "$cpid" "$HPID" 2>/dev/null
+    kc_test_pass "tcp-loss-moderate-$host"; return 0
+}
+
 # Runs the validation suite.
 # @return 0 on success, 1 on failure.
 kc_test_main() {
@@ -991,6 +1031,10 @@ kc_test_main() {
     ipv6_port=$((PORT_BASE + 37))
     ipv6_backend=$((PORT_BASE + 38))
     ipv6_listen=$((PORT_BASE + 121))
+    backend_tcp_8=$((PORT_BASE + 39))
+    backend_tcp_9=$((PORT_BASE + 40))
+    listen_tcp_7=$((PORT_BASE + 122))
+    listen_tcp_8=$((PORT_BASE + 123))
 
     kc_test_binary || return 1
     kc_test_cli || return 1
@@ -1006,6 +1050,8 @@ kc_test_main() {
     kc_test_tcp_large "$index_port" web5 "$backend_tcp_5" "$listen_tcp_4" "" || return 1
     kc_test_tcp_loss_bidir "$index_port" web6 "$backend_tcp_6" "$listen_tcp_5" "" || return 1
     kc_test_tcp_reorder "$index_port" web7 "$backend_tcp_7" "$listen_tcp_6" "" || return 1
+    kc_test_tcp_loss_moderate "$index_port" web8 "$backend_tcp_8" "$listen_tcp_7" "" || return 1
+    kc_test_tcp_loss_moderate "$index_port" web9 "$backend_tcp_9" "$listen_tcp_8" "" || return 1
     kc_test_set_udp "$index_port" game0 "$backend_udp_1" "" || return 1
     kc_test_udp_echo "$index_port" game1 "$backend_udp_2" "$listen_udp_1" "" || return 1
     kc_test_index_stop

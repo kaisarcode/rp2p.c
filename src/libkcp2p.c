@@ -96,6 +96,11 @@ typedef int kc_p2p_fd_t;
 #define KC_P2P_STREAM_MAX_RETRIES 12
 #define KC_P2P_STREAM_RTO_BACKOFF_SHIFT 4
 #define KC_P2P_STREAM_MAX_BURST          16
+#define KC_P2P_STREAM_HEADER_SZ         44
+#define KC_P2P_IPV4_UDP_OVERHEAD        28
+#define KC_P2P_IPV6_UDP_OVERHEAD        40
+#define KC_P2P_MAX_DATAGRAM_V4          1472
+#define KC_P2P_MAX_DATAGRAM_V6          1452
 #define KC_P2P_PUNCH_DIRECT_ROUNDS 3
 #define KC_P2P_PUNCH_DIRECT_WAIT_MS 500
 #define KC_P2P_PUNCH_SWEEP_WAIT_MS 20
@@ -146,6 +151,16 @@ typedef struct {
 #ifndef KC_P2P_BUILD_VERSION
 #define KC_P2P_BUILD_VERSION 0
 #endif
+
+/**
+ * Compile-time size assertion for MTU safety.
+ * @return void.
+ */
+static void kc_p2p_size_check(void) {
+    (void)sizeof(char[1 - 2 * (KC_P2P_STREAM_HEADER_SZ + KC_P2P_STREAM_TAG_SZ >
+        KC_P2P_STREAM_MAX_FRAME - KC_P2P_STREAM_MAX_PAYLOAD)]);
+    (void)sizeof(char[1 - 2 * (KC_P2P_STREAM_MAX_FRAME > KC_P2P_MAX_DATAGRAM_V4)]);
+}
 
 /**
  * Returns the build version generated at compile time.
@@ -1078,6 +1093,7 @@ static int kc_p2p_stream_send_raw(kc_p2p_t *ctx, kc_p2p_fd_t fd,
     socklen_t peer_len;
 
     (void)ctx;
+    if (len > KC_P2P_STREAM_MAX_FRAME) return -1;
     peer_len = kc_p2p_sockaddr_len(peer_addr);
     if (peer_len == 0) return -1;
 
@@ -1470,6 +1486,7 @@ static int kc_p2p_stream_queue_reliable(kc_p2p_t *ctx, kc_p2p_fd_t fd,
     kc_p2p_stream_header_t hdr;
     size_t frame_len;
 
+    if (plain_len > KC_P2P_STREAM_MAX_PAYLOAD) return -1;
     slot = kc_p2p_stream_alloc_send_slot(st);
     if (!slot) return -1;
 
@@ -2834,6 +2851,7 @@ int kc_p2p_open(kc_p2p_t **out) {
     kc_p2p_t *ctx;
     kc_p2p_peer_t *p;
 
+    kc_p2p_size_check();
     if (!out) return KC_P2P_ERROR;
     ctx = (kc_p2p_t *)calloc(1, sizeof(kc_p2p_t));
     if (!ctx) return KC_P2P_ERROR;
@@ -5597,12 +5615,20 @@ int kc_p2p_wait(
             }
 
             if (FD_ISSET(udp_fd, &fds)) {
-                char buf[KC_P2P_BUF];
+                char buf[KC_P2P_BUF + 1];
                 struct sockaddr_storage from;
                 socklen_t fromlen = sizeof(from);
-                n = (int)recvfrom(udp_fd, buf, sizeof(buf), 0,
+                int recv_flags = 0;
+#ifndef _WIN32
+                recv_flags |= MSG_TRUNC;
+#endif
+                n = (int)recvfrom(udp_fd, buf, KC_P2P_BUF, recv_flags,
                     (struct sockaddr *)&from, &fromlen);
                 if (n > 0) {
+#ifndef _WIN32
+                    if ((size_t)n > KC_P2P_BUF) return -1;
+#endif
+                    if ((size_t)n >= sizeof(buf)) n = (int)(sizeof(buf) - 1);
                     buf[n] = '\0';
 
                     int found = -1;

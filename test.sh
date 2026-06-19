@@ -939,6 +939,45 @@ kc_test_auth_register() {
     return 0
 }
 
+# Verifies a large UDP datagram (1400 bytes, near MTU) crosses the tunnel.
+# @return 0 on success, 1 on failure.
+kc_test_udp_large() {
+    port=$1
+    host=$2
+    backend_port=$3
+    listen_port=$4
+    pass_key=$5
+    in="$TMP_ROOT/udp-large.in"
+    out="$TMP_ROOT/udp-large.out"
+    msg=$(openssl rand -base64 1050 2>/dev/null | tr -d '\n' | head -c 1400)
+    printf '%s' "$msg" > "$in"
+
+    kc_test_udp_start "$backend_port" || return 1
+    if [ -n "$pass_key" ]; then
+        P2P_PASS="$pass_key" "$BIN" set "${host}@127.0.0.1:${port}" --udp "$backend_port" > "$TMP_ROOT/udp-large-set.log" 2>&1 &
+    else
+        "$BIN" set "${host}@127.0.0.1:${port}" --udp "$backend_port" > "$TMP_ROOT/udp-large-set.log" 2>&1 &
+    fi
+    spid=$!
+    sleep 2
+    "$BIN" con "${host}@127.0.0.1:${port}" --udp "$listen_port" > "$TMP_ROOT/udp-large-con.log" 2>&1 &
+    cpid=$!
+    sleep 2
+    if ! socat -t 2 - UDP:127.0.0.1:"$listen_port" < "$in" > "$out" 2>/dev/null; then
+        kill -9 "$spid" "$cpid" "$UPID" 2>/dev/null
+        wait "$spid" "$cpid" "$UPID" 2>/dev/null
+        kc_test_fail "udp-large-$host"; return 1
+    fi
+    if ! cmp -s "$in" "$out"; then
+        kill -9 "$spid" "$cpid" "$UPID" 2>/dev/null
+        wait "$spid" "$cpid" "$UPID" 2>/dev/null
+        kc_test_fail "udp-large-$host"; return 1
+    fi
+    kill -9 "$spid" "$cpid" "$UPID" 2>/dev/null
+    wait "$spid" "$cpid" "$UPID" 2>/dev/null
+    kc_test_pass "udp-large-$host"; return 0
+}
+
 # Verifies moderate DATA frame loss with 1 MiB transfer.
 # @return 0 on success, 1 on failure.
 kc_test_tcp_loss_moderate() {
@@ -947,8 +986,8 @@ kc_test_tcp_loss_moderate() {
     backend_port=$3
     listen_port=$4
     pass_key=$5
-    in="$TMP_ROOT/loss-moderate.in"
-    out="$TMP_ROOT/loss-moderate.out"
+    in="$TMP_ROOT/loss-moderate-$host.in"
+    out="$TMP_ROOT/loss-moderate-$host.out"
 
     dd if=/dev/urandom of="$in" bs=131072 count=1 status=none || return 1
     kc_test_tcp_start "$backend_port" || return 1
@@ -1000,6 +1039,8 @@ kc_test_main() {
     listen_tcp_5=$((PORT_BASE + 115))
     listen_tcp_6=$((PORT_BASE + 116))
     listen_udp_1=$((PORT_BASE + 120))
+    listen_udp_2=$((PORT_BASE + 124))
+    backend_udp_3=$((PORT_BASE + 41))
     public_pow_port=$((PORT_BASE + 1))
     auth_port_1=$((PORT_BASE + 2))
     auth_port_2=$((PORT_BASE + 3))
@@ -1054,6 +1095,7 @@ kc_test_main() {
     kc_test_tcp_loss_moderate "$index_port" web9 "$backend_tcp_9" "$listen_tcp_8" "" || return 1
     kc_test_set_udp "$index_port" game0 "$backend_udp_1" "" || return 1
     kc_test_udp_echo "$index_port" game1 "$backend_udp_2" "$listen_udp_1" "" || return 1
+    kc_test_udp_large "$index_port" game2 "$backend_udp_3" "$listen_udp_2" "" || return 1
     kc_test_index_stop
     kc_test_index_start "$public_pow_port" 20 "" public-pow || return 1
     kc_test_set_tcp "$public_pow_port" publicpow "$auth_backend_1" "" || return 1

@@ -1637,6 +1637,11 @@ static int kc_p2p_stream_process_packet(kc_p2p_t *ctx, kc_p2p_fd_t fd,
         return 0;
     if (!st->ready) return 0;
     if (hdr.direction != st->rx_direction) return 0;
+
+    if (hdr.payload_len > KC_P2P_STREAM_MAX_PAYLOAD) return 0;
+    if (len != 44 + KC_P2P_STREAM_TAG_SZ + (size_t)hdr.payload_len) return 0;
+    if (hdr.type != KC_P2P_STREAM_TYPE_DATA && hdr.payload_len != 0) return 0;
+
     if (!kc_p2p_stream_decrypt_packet(st, &hdr, buf, plain)) return -1;
 
     st->last_rx_ms = kc_p2p_now_ms();

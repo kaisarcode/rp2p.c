@@ -642,6 +642,8 @@ static int kc_p2p_sock_read(kc_p2p_fd_t fd, char *buf, int len);
 static int kc_p2p_write_all(kc_p2p_fd_t fd, const char *buf, int len);
 static void kc_p2p_shutdown_write(kc_p2p_fd_t fd);
 static socklen_t kc_p2p_sockaddr_len(const struct sockaddr_storage *addr);
+static int kc_p2p_candidate_sockaddr(const kc_p2p_candidate_t *candidate,
+    struct sockaddr_storage *out);
 static int kc_p2p_is_space(char ch);
 static char *kc_p2p_trim(char *text);
 static int kc_p2p_find_vip(kc_p2p_t *ctx, const char *id);
@@ -3599,6 +3601,127 @@ static const char *kc_p2p_candidate_type_name(kc_p2p_candidate_type_t type) {
 }
 
 /**
+ * Returns the address family for one candidate address.
+ * @param candidate Candidate to inspect.
+ * @return AF_INET, AF_INET6, or AF_UNSPEC.
+ */
+static int kc_p2p_candidate_family(const kc_p2p_candidate_t *candidate) {
+    struct in_addr ipv4;
+    struct in6_addr ipv6;
+
+    if (!candidate) return AF_UNSPEC;
+    if (inet_pton(AF_INET, candidate->addr, &ipv4) == 1) return AF_INET;
+    if (inet_pton(AF_INET6, candidate->addr, &ipv6) == 1) return AF_INET6;
+    return AF_UNSPEC;
+}
+
+/**
+ * Returns the deterministic local priority for one candidate.
+ * @param candidate Candidate to rank.
+ * @return Lower priority values are attempted first.
+ */
+static unsigned int kc_p2p_candidate_priority(
+    const kc_p2p_candidate_t *candidate)
+{
+    int family;
+    unsigned int base;
+
+    if (!candidate) return 900u;
+    family = kc_p2p_candidate_family(candidate);
+    if (family == AF_INET6) base = 100u;
+    else if (family == AF_INET) base = 200u;
+    else return 900u;
+    if (candidate->type == KC_P2P_CAND_HOST) return base;
+    if (candidate->type == KC_P2P_CAND_LAN) return base + 10u;
+    if (candidate->type == KC_P2P_CAND_PUBLIC) return base + 20u;
+    if (candidate->type == KC_P2P_CAND_SRFLX) return base + 30u;
+    if (candidate->type == KC_P2P_CAND_PRFLX) return base + 40u;
+    if (candidate->type == KC_P2P_CAND_PREDICTED) return base + 50u;
+    return 900u;
+}
+
+/**
+ * Reports whether two candidates describe the same network endpoint.
+ * @param a First candidate.
+ * @param b Second candidate.
+ * @return 1 when equivalent, 0 otherwise.
+ */
+static int kc_p2p_candidate_same_endpoint(const kc_p2p_candidate_t *a,
+    const kc_p2p_candidate_t *b)
+{
+    struct sockaddr_storage aa;
+    struct sockaddr_storage bb;
+
+    if (!a || !b || a->port != b->port) return 0;
+    if (kc_p2p_candidate_family(a) != kc_p2p_candidate_family(b)) return 0;
+    if (!kc_p2p_candidate_sockaddr(a, &aa)) return 0;
+    if (!kc_p2p_candidate_sockaddr(b, &bb)) return 0;
+    return kc_p2p_sockaddr_equal(&aa, &bb);
+}
+
+/**
+ * Compares two candidates by local priority and stable textual fields.
+ * @param a First candidate.
+ * @param b Second candidate.
+ * @return Negative, zero, or positive comparison result.
+ */
+static int kc_p2p_candidate_compare(const kc_p2p_candidate_t *a,
+    const kc_p2p_candidate_t *b)
+{
+    int cmp;
+
+    if (a->priority != b->priority)
+        return a->priority < b->priority ? -1 : 1;
+    if (a->type != b->type) return (int)a->type - (int)b->type;
+    cmp = strcmp(a->addr, b->addr);
+    if (cmp != 0) return cmp;
+    return (int)a->port - (int)b->port;
+}
+
+/**
+ * Normalizes candidate priority, removes duplicates, and sorts the list.
+ * @param candidates Candidate array.
+ * @param count      Candidate count in and out.
+ * @return 1 on success, 0 on malformed input.
+ */
+static int kc_p2p_normalize_candidates(kc_p2p_candidate_t *candidates,
+    int *count)
+{
+    int i;
+    int n;
+
+    if (!candidates || !count || *count < 0 || *count > KC_P2P_CANDIDATES_MAX)
+        return 0;
+    n = 0;
+    for (i = 0; i < *count; i++) {
+        int j;
+        if (candidates[i].port == 0) return 0;
+        if (kc_p2p_candidate_family(&candidates[i]) == AF_UNSPEC) return 0;
+        candidates[i].priority = kc_p2p_candidate_priority(&candidates[i]);
+        if (candidates[i].priority >= 900u) return 0;
+        for (j = 0; j < n; j++) {
+            if (!kc_p2p_candidate_same_endpoint(&candidates[j], &candidates[i]))
+                continue;
+            if (kc_p2p_candidate_compare(&candidates[i], &candidates[j]) < 0)
+                candidates[j] = candidates[i];
+            break;
+        }
+        if (j == n) candidates[n++] = candidates[i];
+    }
+    for (i = 1; i < n; i++) {
+        kc_p2p_candidate_t item = candidates[i];
+        int j = i - 1;
+        while (j >= 0 && kc_p2p_candidate_compare(&item, &candidates[j]) < 0) {
+            candidates[j + 1] = candidates[j];
+            j--;
+        }
+        candidates[j + 1] = item;
+    }
+    *count = n;
+    return 1;
+}
+
+/**
  * Parses one strict candidate line.
  * @param line Input line.
  * @param out  Output candidate.
@@ -3642,7 +3765,8 @@ static int kc_p2p_parse_candidate_line(const char *line,
         return 0;
     if (!kc_p2p_parse_port_token(port_text, &out->port)) return 0;
     snprintf(out->addr, sizeof(out->addr), "%s", addr);
-    out->priority = 0;
+    out->priority = kc_p2p_candidate_priority(out);
+    if (out->priority >= 900u) return 0;
     return 1;
 }
 
@@ -3711,7 +3835,8 @@ static int kc_p2p_parse_remote_candidates(const char *buf,
         if (!nl) return 0;
         len = (size_t)(nl - p);
         if (len == 0) return 0;
-        if (len == 3 && memcmp(p, "END", 3) == 0) return 1;
+        if (len == 3 && memcmp(p, "END", 3) == 0)
+            return kc_p2p_normalize_candidates(out, out_count);
         if (len >= sizeof(line)) return 0;
         memcpy(line, p, len);
         line[len] = '\0';
@@ -4279,6 +4404,7 @@ int kc_p2p_gather_candidates(kc_p2p_t *ctx, int udp_fd,
             else
                 strcpy(out[*out_count].addr, "127.0.0.1");
             out[*out_count].port = udp_port;
+            out[*out_count].priority = kc_p2p_candidate_priority(&out[*out_count]);
             (*out_count)++;
         }
         
@@ -4301,6 +4427,7 @@ int kc_p2p_gather_candidates(kc_p2p_t *ctx, int udp_fd,
                         out[*out_count].type = KC_P2P_CAND_LAN;
                         strcpy(out[*out_count].addr, local_ip);
                         out[*out_count].port = udp_port;
+                        out[*out_count].priority = kc_p2p_candidate_priority(&out[*out_count]);
                         (*out_count)++;
                     }
                 }
@@ -4318,9 +4445,11 @@ int kc_p2p_gather_candidates(kc_p2p_t *ctx, int udp_fd,
             snprintf(out[*out_count].addr, sizeof(out[*out_count].addr),
                 "%.47s", stun_ip);
             out[*out_count].port = srflx_port;
+            out[*out_count].priority = kc_p2p_candidate_priority(&out[*out_count]);
             (*out_count)++;
         }
     }
+    if (!kc_p2p_normalize_candidates(out, out_count)) return KC_P2P_ERROR;
     return KC_P2P_OK;
 }
 
@@ -4369,14 +4498,20 @@ static int kc_p2p_candidate_sockaddr(const kc_p2p_candidate_t *candidate,
 int kc_p2p_punch_select(kc_p2p_t *ctx, int sweep_limit, int udp_fd, const char *session_id, const char *from_id, const char *to_id, const kc_p2p_candidate_t *remote_candidates, int remote_candidate_count, struct sockaddr_storage *selected_addr) {
     (void)ctx;
     if (remote_candidate_count <= 0) return KC_P2P_ERROR;
+    int direct_count = 0;
+    for (int c = 0; c < remote_candidate_count; c++) {
+        if (remote_candidates[c].priority < 300u) direct_count++;
+    }
     
     char ping_msg[256];
     snprintf(ping_msg, sizeof(ping_msg), "PUNCH_PING:%s:%s:%s\n", session_id, from_id, to_id);
     
-    for (int i = 0; i < 3; i++) { 
+    for (int i = 0; direct_count > 0 && i < 3; i++) { 
         for (int c = 0; c < remote_candidate_count; c++) {
             struct sockaddr_storage cand_sa;
             socklen_t cand_len;
+
+            if (remote_candidates[c].priority >= 300u) continue;
             memset(&cand_sa, 0, sizeof(cand_sa));
             if (!kc_p2p_candidate_sockaddr(&remote_candidates[c], &cand_sa))
                 continue;

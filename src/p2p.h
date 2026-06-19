@@ -66,6 +66,10 @@ typedef struct {
     time_t last_seen;
 } kc_p2p_peer_t;
 
+/**
+ * Candidate transport class.
+ * Summary: Ranks direct candidates before public or observed candidates.
+ */
 typedef enum {
     KC_P2P_CAND_HOST = 1,
     KC_P2P_CAND_LAN,
@@ -76,6 +80,10 @@ typedef enum {
     KC_P2P_CAND_PROXY
 } kc_p2p_candidate_type_t;
 
+/**
+ * Candidate endpoint exchanged through the TCP rendezvous control channel.
+ * Summary: The priority is local-only and is recomputed after parsing.
+ */
 typedef struct {
     kc_p2p_candidate_type_t type;
     char addr[KC_P2P_ADDR_MAX + 1];

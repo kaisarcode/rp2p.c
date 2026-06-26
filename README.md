@@ -411,6 +411,26 @@ Compiled artifacts are generated under `bin/{arch}/{platform}/` for the host arc
 make clean && make
 ```
 
+### Tests
+
+The portable test entry point is `make test`. Build project artifacts first, then run tests. Tests compile only test executables, link dynamically against the generated shared library, and run through CTest.
+
+```bash
+make
+make test
+```
+
+To run the common `test` target in Windows-through-Wine mode:
+
+```bash
+make x86_64/windows
+make test wine
+```
+
+The portable C test source is `src/test.c`. Test binaries and runtime outputs are build artifacts and are not stored in the project tree.
+
+Build targets such as `make x86_64/windows` compile project artifacts. Tests are run only through `make test` or `make test wine`.
+
 ### Multiarch Builds
 
 The project is prepared to build artifacts for multiple architectures under `bin/{arch}/{platform}/`. A plain `make` builds only the current host architecture.

@@ -116,8 +116,8 @@ typedef int rp2p_fd_t;
 #define RP2P_CTRTOK_REGISTER     "RP2P_CTRTOK_REGISTER:"
 #define RP2P_CTRTOK_DEREGISTER   "RP2P_CTRTOK_DEREGISTER:"
 #define RP2P_CTRTOK_LOOKUP       "RP2P_CTRTOK_LOOKUP:"
-#define RP2P_CTRTOK_LIST         "RP2P_CTRTOK_LIST"
-#define RP2P_CTRTOK_PEER         "RP2P_CTRTOK_PEER:"
+#define RP2P_CTRTOK_LIST_PUBLISHERS "RP2P_CTRTOK_LIST_PUBLISHERS"
+#define RP2P_CTRTOK_PUBLISHER    "RP2P_CTRTOK_PUBLISHER:"
 #define RP2P_CTRTOK_END          "RP2P_CTRTOK_END"
 #define RP2P_CTRTOK_CHALLENGE    "RP2P_CTRTOK_CHALLENGE:"
 #define RP2P_CTRTOK_OK           "RP2P_CTRTOK_OK"
@@ -141,7 +141,7 @@ typedef int rp2p_fd_t;
 #define RP2P_CTRCMD_REGISTER     "RP2P_CTRTOK_REGISTER"
 #define RP2P_CTRCMD_DEREGISTER   "RP2P_CTRTOK_DEREGISTER"
 #define RP2P_CTRCMD_LOOKUP       "RP2P_CTRTOK_LOOKUP"
-#define RP2P_CTRCMD_LIST         "RP2P_CTRTOK_LIST"
+#define RP2P_CTRCMD_LIST_PUBLISHERS "RP2P_CTRTOK_LIST_PUBLISHERS"
 #define RP2P_CTRCMD_PUNCH_REQ2   "RP2P_CTRTOK_PUNCH_REQ2"
 #define RP2P_CTRCMD_PUNCH_ACK2   "RP2P_CTRTOK_PUNCH_ACK2"
 
@@ -5095,8 +5095,8 @@ int rp2p_serve_index(
                                     RP2P_CTRTOK_ERROR_MALFORMED);
                             }
 
-                        } else if (strcmp(cmd, RP2P_CTRCMD_LIST) == 0) {
-                            if (strcmp(cmd_buf, RP2P_CTRTOK_LIST) != 0) {
+                        } else if (strcmp(cmd, RP2P_CTRCMD_LIST_PUBLISHERS) == 0) {
+                            if (strcmp(cmd_buf, RP2P_CTRTOK_LIST_PUBLISHERS) != 0) {
                                 rp2p_tcp_send(c->fd,
                                     RP2P_CTRTOK_ERROR_MALFORMED);
                                 continue;
@@ -5104,7 +5104,7 @@ int rp2p_serve_index(
                             rp2p_evict_stale(ctx);
                             for (srv_idx = 0; srv_idx < ctx->n_peers; srv_idx++) {
                                 snprintf(reply_buf, sizeof(reply_buf), "%s%s",
-                                    RP2P_CTRTOK_PEER,
+                                    RP2P_CTRTOK_PUBLISHER,
                                     ctx->peers[srv_idx].id);
                                 rp2p_tcp_send(c->fd, reply_buf);
                             }
@@ -5115,7 +5115,7 @@ int rp2p_serve_index(
                                 srv_idx = rp2p_find_peer(ctx, id);
                                 if (srv_idx >= 0) {
                                     snprintf(reply_buf, sizeof(reply_buf), "%s%s",
-                                        RP2P_CTRTOK_PEER,
+                                        RP2P_CTRTOK_PUBLISHER,
                                         ctx->peers[srv_idx].id);
                                     rp2p_tcp_send(c->fd, reply_buf);
                                 } else {
@@ -5262,6 +5262,54 @@ int rp2p_deregister(
 
     if (strcmp(reply, RP2P_CTRTOK_OK) != 0) return RP2P_ERROR;
     return RP2P_OK;
+}
+
+/**
+ * List publishers.
+ * @return 0 on success, negative error code on failure.
+ */
+int rp2p_list_publishers(
+    rp2p_t *ctx,
+    const char *index_host,
+    unsigned short index_port,
+    rp2p_publisher_cb cb,
+    void *userdata)
+{
+    rp2p_fd_t fd;
+    char line[RP2P_BUF];
+    size_t prefix_len;
+
+    if (!ctx || !index_host || !index_host[0] || !cb) return RP2P_ERROR;
+    fd = rp2p_control_connect(index_host, index_port);
+    if (RP2P_ISERR(fd)) return RP2P_ENET;
+    if (rp2p_tcp_send(fd, RP2P_CTRTOK_LIST_PUBLISHERS) != RP2P_OK) {
+        RP2P_FD_CLOSE(fd);
+        return RP2P_ENET;
+    }
+    prefix_len = strlen(RP2P_CTRTOK_PUBLISHER);
+    for (;;) {
+        if (rp2p_tcp_readline(fd, line, (int)sizeof(line),
+            RP2P_ETIMEOUT_SEC) < 0)
+        {
+            RP2P_FD_CLOSE(fd);
+            return RP2P_ETIMEOUT;
+        }
+        if (strcmp(line, RP2P_CTRTOK_END) == 0) {
+            RP2P_FD_CLOSE(fd);
+            return RP2P_OK;
+        }
+        if (strncmp(line, RP2P_CTRTOK_PUBLISHER, prefix_len) == 0) {
+            const char *id = line + prefix_len;
+            if (!rp2p_is_valid_id(id)) {
+                RP2P_FD_CLOSE(fd);
+                return RP2P_ERROR;
+            }
+            cb(id, userdata);
+            continue;
+        }
+        RP2P_FD_CLOSE(fd);
+        return RP2P_ERROR;
+    }
 }
 
 /**
@@ -5896,10 +5944,10 @@ int rp2p_connect(
         { RP2P_FD_CLOSE(ctrl_fd); RP2P_FD_CLOSE(local_fd); if (!RP2P_ISERR(tcp_listen_fd)) RP2P_FD_CLOSE(tcp_listen_fd); rp2p_platform_cleanup(); return RP2P_ENET; }
         if (strcmp(recv_buf, RP2P_CTRTOK_NOT_FOUND) == 0)
         { RP2P_FD_CLOSE(ctrl_fd); RP2P_FD_CLOSE(local_fd); if (!RP2P_ISERR(tcp_listen_fd)) RP2P_FD_CLOSE(tcp_listen_fd); rp2p_platform_cleanup(); return RP2P_ENOENT; }
-        if (strcmp(recv_buf, RP2P_CTRTOK_PEER) == 0 ||
-            strncmp(recv_buf, RP2P_CTRTOK_PEER,
-            strlen(RP2P_CTRTOK_PEER)) != 0 ||
-            strcmp(recv_buf + strlen(RP2P_CTRTOK_PEER), target_id) != 0)
+        if (strcmp(recv_buf, RP2P_CTRTOK_PUBLISHER) == 0 ||
+            strncmp(recv_buf, RP2P_CTRTOK_PUBLISHER,
+            strlen(RP2P_CTRTOK_PUBLISHER)) != 0 ||
+            strcmp(recv_buf + strlen(RP2P_CTRTOK_PUBLISHER), target_id) != 0)
         { RP2P_FD_CLOSE(ctrl_fd); RP2P_FD_CLOSE(local_fd); if (!RP2P_ISERR(tcp_listen_fd)) RP2P_FD_CLOSE(tcp_listen_fd); rp2p_platform_cleanup(); return RP2P_ERROR; }
     }
     RP2P_FD_CLOSE(ctrl_fd);

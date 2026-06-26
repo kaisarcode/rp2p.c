@@ -21,8 +21,8 @@ CTRL_HELLO_OK='RP2P_CTRTOK_HELLO_OK'
 CTRL_REGISTER='RP2P_CTRTOK_REGISTER:'
 CTRL_DEREGISTER='RP2P_CTRTOK_DEREGISTER:'
 CTRL_LOOKUP='RP2P_CTRTOK_LOOKUP:'
-CTRL_LIST='RP2P_CTRTOK_LIST'
-CTRL_PEER='RP2P_CTRTOK_PEER:'
+CTRL_LIST_PUBLISHERS='RP2P_CTRTOK_LIST_PUBLISHERS'
+CTRL_PUBLISHER='RP2P_CTRTOK_PUBLISHER:'
 CTRL_END='RP2P_CTRTOK_END'
 CTRL_CHALLENGE='RP2P_CTRTOK_CHALLENGE:'
 CTRL_AUTH_FAILED='RP2P_CTRTOK_AUTH_FAILED'
@@ -530,29 +530,29 @@ kc_test_control_catalog() {
     fi
     kc_test_pass "control reject duplicate handshake"
 
-    if ! printf '%s\n%s\n' "$CTRL_HELLO" "$CTRL_LIST" | nc -w 2 127.0.0.1 "$port" > "$list_out" 2>/dev/null; then
+    if ! printf '%s\n%s\n' "$CTRL_HELLO" "$CTRL_LIST_PUBLISHERS" | nc -w 2 127.0.0.1 "$port" > "$list_out" 2>/dev/null; then
         kc_test_kill "$spid" "$HPID"
-        kc_test_fail "control $CTRL_LIST after register: expected $CTRL_PEER line, nc failed"
+        kc_test_fail "control $CTRL_LIST_PUBLISHERS after register: expected $CTRL_PUBLISHER line, nc failed"
         return 1
     fi
-    if ! grep -q "^${CTRL_PEER}control$" "$list_out"; then
+    if ! grep -q "^${CTRL_PUBLISHER}control$" "$list_out"; then
         kc_test_kill "$spid" "$HPID"
-        kc_test_fail "control $CTRL_LIST after register: expected ${CTRL_PEER}control, got $(tr '\n' '|' < "$list_out" | head -c 60)"
+        kc_test_fail "control $CTRL_LIST_PUBLISHERS after register: expected ${CTRL_PUBLISHER}control, got $(tr '\n' '|' < "$list_out" | head -c 60)"
         return 1
     fi
-    kc_test_pass "control $CTRL_LIST returns registered peer"
+    kc_test_pass "control $CTRL_LIST_PUBLISHERS returns registered publisher"
 
     if ! printf '%s\n%scontrol\n' "$CTRL_HELLO" "$CTRL_LOOKUP" | nc -w 2 127.0.0.1 "$port" > "$lookup_out" 2>/dev/null; then
         kc_test_kill "$spid" "$HPID"
-        kc_test_fail "control lookup existing peer: expected ${CTRL_PEER}control, nc failed"
+        kc_test_fail "control lookup existing publisher: expected ${CTRL_PUBLISHER}control, nc failed"
         return 1
     fi
-    if ! grep -q "^${CTRL_PEER}control$" "$lookup_out"; then
+    if ! grep -q "^${CTRL_PUBLISHER}control$" "$lookup_out"; then
         kc_test_kill "$spid" "$HPID"
-        kc_test_fail "control lookup existing peer: expected ${CTRL_PEER}control, got $(tr '\n' '|' < "$lookup_out" | head -c 60)"
+        kc_test_fail "control lookup existing publisher: expected ${CTRL_PUBLISHER}control, got $(tr '\n' '|' < "$lookup_out" | head -c 60)"
         return 1
     fi
-    kc_test_pass "control lookup returns registered peer"
+    kc_test_pass "control lookup returns registered publisher"
 
     if ! printf '%s\n%scontrol:extra\n' "$CTRL_HELLO" "$CTRL_LOOKUP" | nc -w 2 127.0.0.1 "$port" > "$bad_lookup_out" 2>/dev/null; then
         kc_test_kill "$spid" "$HPID"
@@ -566,14 +566,14 @@ kc_test_control_catalog() {
     fi
     kc_test_pass "control reject malformed lookup"
 
-    if ! printf '%s\n%s\n%scontrol\n' "$CTRL_HELLO" "$CTRL_LIST" "$CTRL_LOOKUP" | nc -w 2 127.0.0.1 "$port" > "$multi_out" 2>/dev/null; then
+    if ! printf '%s\n%s\n%scontrol\n' "$CTRL_HELLO" "$CTRL_LIST_PUBLISHERS" "$CTRL_LOOKUP" | nc -w 2 127.0.0.1 "$port" > "$multi_out" 2>/dev/null; then
         kc_test_kill "$spid" "$HPID"
-        kc_test_fail "control multi-command ($CTRL_LIST + $CTRL_LOOKUP): expected $CTRL_PEER lines, nc failed"
+        kc_test_fail "control multi-command ($CTRL_LIST_PUBLISHERS + $CTRL_LOOKUP): expected $CTRL_PUBLISHER lines, nc failed"
         return 1
     fi
-    if ! grep -q "^${CTRL_PEER}control$" "$multi_out"; then
+    if ! grep -q "^${CTRL_PUBLISHER}control$" "$multi_out"; then
         kc_test_kill "$spid" "$HPID"
-        kc_test_fail "control multi-command: expected ${CTRL_PEER}control in output, got $(tr '\n' '|' < "$multi_out" | head -c 80)"
+        kc_test_fail "control multi-command: expected ${CTRL_PUBLISHER}control in output, got $(tr '\n' '|' < "$multi_out" | head -c 80)"
         return 1
     fi
     kc_test_pass "control multi-command pipelining"
@@ -611,6 +611,72 @@ kc_test_control_catalog() {
     return 0
 }
 
+# Verifies the public publisher listing API.
+# @return 0 on success, 1 on failure.
+kc_test_publisher_api() {
+    port=$1
+    backend_one=$2
+    backend_two=$3
+    helper="$TMP_ROOT/list-publishers-api"
+    empty_out="$TMP_ROOT/list-publishers-empty.out"
+    full_out="$TMP_ROOT/list-publishers-full.out"
+
+    if ! cc -std=c11 -Wall -Wextra -Werror -I. test/list-publishers.c \
+        bin/x86_64/linux/librp2p.a -o "$helper" -lpthread -lm
+    then
+        kc_test_fail "publisher API helper: expected clean build"
+        return 1
+    fi
+    kc_test_index_start "$port" 0 "" publisher-api || return 1
+    if ! "$helper" 127.0.0.1 "$port" > "$empty_out" 2>/dev/null; then
+        kc_test_index_stop
+        kc_test_fail "publisher API empty index: expected success"
+        return 1
+    fi
+    if [ -s "$empty_out" ]; then
+        kc_test_index_stop
+        kc_test_fail "publisher API empty index: expected no callbacks, got $(tr '\n' '|' < "$empty_out" | head -c 80)"
+        return 1
+    fi
+    kc_test_pass "publisher API empty index returns no publishers"
+
+    kc_test_tcp_start "$backend_one" || { kc_test_index_stop; return 1; }
+    hpid_one=$HPID
+    kc_test_tcp_start "$backend_two" || { kc_test_kill "$hpid_one"; kc_test_index_stop; return 1; }
+    hpid_two=$HPID
+    "$BIN" set pubone@127.0.0.1:"$port" --tcp "$backend_one" > "$TMP_ROOT/pubone-set.log" 2>&1 &
+    spid_one=$!
+    "$BIN" set pubtwo@127.0.0.1:"$port" --tcp "$backend_two" > "$TMP_ROOT/pubtwo-set.log" 2>&1 &
+    spid_two=$!
+    if ! kc_test_wait_published "$TMP_ROOT/pubone-set.log" ||
+        ! kc_test_wait_published "$TMP_ROOT/pubtwo-set.log"
+    then
+        kc_test_kill "$spid_one" "$spid_two" "$hpid_one" "$hpid_two"
+        kc_test_index_stop
+        kc_test_fail "publisher API setup: expected both publishers to register"
+        return 1
+    fi
+    if ! "$helper" 127.0.0.1 "$port" > "$full_out" 2>/dev/null; then
+        kc_test_kill "$spid_one" "$spid_two" "$hpid_one" "$hpid_two"
+        kc_test_index_stop
+        kc_test_fail "publisher API populated index: expected success"
+        return 1
+    fi
+    if [ "$(grep -c '^pubone$' "$full_out")" -ne 1 ] ||
+        [ "$(grep -c '^pubtwo$' "$full_out")" -ne 1 ] ||
+        [ "$(wc -l < "$full_out")" -ne 2 ]
+    then
+        kc_test_kill "$spid_one" "$spid_two" "$hpid_one" "$hpid_two"
+        kc_test_index_stop
+        kc_test_fail "publisher API populated index: expected pubone and pubtwo once, got $(tr '\n' '|' < "$full_out" | head -c 80)"
+        return 1
+    fi
+    kc_test_kill "$spid_one" "$spid_two" "$hpid_one" "$hpid_two"
+    kc_test_index_stop
+    kc_test_pass "publisher API returns each registered publisher once"
+    return 0
+}
+
 # Verifies TCP control and direct tunnel operation over IPv6 loopback.
 # @return 0 on success, 1 on failure.
 kc_test_ipv6_loopback() {
@@ -627,14 +693,14 @@ kc_test_ipv6_loopback() {
         return 0
     fi
     kc_test_index_start "$port" 0 "" ipv6 || return 1
-    if ! printf '%s\n%s\n' "$CTRL_HELLO" "$CTRL_LIST" | socat -t 2 - "TCP6:[::1]:$port" > "$list_out" 2>/dev/null; then
+    if ! printf '%s\n%s\n' "$CTRL_HELLO" "$CTRL_LIST_PUBLISHERS" | socat -t 2 - "TCP6:[::1]:$port" > "$list_out" 2>/dev/null; then
         kc_test_index_stop
-        kc_test_fail "IPv6 control over [::1]:$port: expected successful $CTRL_LIST via TCP6, socat failed"
+        kc_test_fail "IPv6 control over [::1]:$port: expected successful $CTRL_LIST_PUBLISHERS via TCP6, socat failed"
         return 1
     fi
     if ! grep -q "^$CTRL_END$" "$list_out"; then
         kc_test_index_stop
-        kc_test_fail "IPv6 control $CTRL_LIST over [::1]:$port: expected $CTRL_END, got $(tr '\n' '|' < "$list_out" | head -c 60)"
+        kc_test_fail "IPv6 control $CTRL_LIST_PUBLISHERS over [::1]:$port: expected $CTRL_END, got $(tr '\n' '|' < "$list_out" | head -c 60)"
         return 1
     fi
     kc_test_pass "IPv6 control protocol over loopback"
@@ -1435,15 +1501,15 @@ kc_test_protocol_vectors() {
     fi
     kc_test_pass "protocol $CTRL_REGISTER bad proof returns $CTRL_AUTH_FAILED"
     out="$TMP_ROOT/proto-list-extra.out"
-    if ! printf '%s\n%s:extra\n' "$CTRL_HELLO" "$CTRL_LIST" | nc -w 2 127.0.0.1 "$port" > "$out" 2>/dev/null; then
-        kc_test_fail "protocol $CTRL_LIST with extra fields: expected $CTRL_ERR_MALFORMED, nc failed"
+    if ! printf '%s\n%s:extra\n' "$CTRL_HELLO" "$CTRL_LIST_PUBLISHERS" | nc -w 2 127.0.0.1 "$port" > "$out" 2>/dev/null; then
+        kc_test_fail "protocol $CTRL_LIST_PUBLISHERS with extra fields: expected $CTRL_ERR_MALFORMED, nc failed"
         return 1
     fi
     if ! grep -q "^$CTRL_ERR_MALFORMED$" "$out"; then
-        kc_test_fail "protocol $CTRL_LIST with extra: expected $CTRL_ERR_MALFORMED, got $(tr '\n' '|' < "$out" | head -c 60)"
+        kc_test_fail "protocol $CTRL_LIST_PUBLISHERS with extra: expected $CTRL_ERR_MALFORMED, got $(tr '\n' '|' < "$out" | head -c 60)"
         return 1
     fi
-    kc_test_pass "protocol reject $CTRL_LIST with extra fields"
+    kc_test_pass "protocol reject $CTRL_LIST_PUBLISHERS with extra fields"
     out="$TMP_ROOT/proto-dereg-no-key.out"
     if ! printf '%s\n%stest\n' "$CTRL_HELLO" "$CTRL_DEREGISTER" | nc -w 2 127.0.0.1 "$port" > "$out" 2>/dev/null; then
         kc_test_fail "protocol deregistration without key: expected $CTRL_ERR_MALFORMED, nc failed"
@@ -1696,12 +1762,17 @@ kc_test_main() {
     listen_disappear2=$((PORT_BASE + 126))
     multictx_port_1=$((PORT_BASE + 127))
     multictx_port_2=$((PORT_BASE + 128))
+    publisher_api_port=$((PORT_BASE + 129))
+    publisher_api_backend_1=$((PORT_BASE + 130))
+    publisher_api_backend_2=$((PORT_BASE + 131))
 
     if ! kc_test_ensure_binary; then
         printf 'prerequisites missing, cannot run suite\n' >&2
         return 1
     fi
     kc_test_multictx_stop "$multictx_port_1" "$multictx_port_2" || return 1
+    kc_test_publisher_api "$publisher_api_port" "$publisher_api_backend_1" \
+        "$publisher_api_backend_2" || return 1
     kc_test_index_start "$index_port" 0 "" public-default || return 1
     kc_test_index_tcp_only "$index_port" || return 1
     kc_test_control_catalog "$index_port" "$control_backend" || return 1

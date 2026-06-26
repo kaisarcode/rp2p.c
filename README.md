@@ -200,6 +200,8 @@ sessions may fail instead of degrading to a relay.
 
 ## Public API
 
+Start an index server:
+
 ```c
 #include "rp2p.h"
 
@@ -214,6 +216,24 @@ rp2p_serve_index(ctx, "0.0.0.0", 9876);
 rp2p_close(ctx);
 ```
 
+List publishers currently registered in an index. Publishers are services registered by `rp2p set`; consumers are clients that use `rp2p con` to look up and connect to those services.
+
+```c
+#include "rp2p.h"
+
+#include <stdio.h>
+
+static void on_publisher(const char *id, void *userdata) {
+    (void)userdata;
+    printf("%s\n", id);
+}
+
+rp2p_t *ctx;
+rp2p_open(&ctx);
+rp2p_list_publishers(ctx, "idx.example.com", 9876, on_publisher, NULL);
+rp2p_close(ctx);
+```
+
 ---
 
 ## Lifecycle
@@ -223,6 +243,7 @@ rp2p_close(ctx);
 - `rp2p_options_load_env()` - loads `RP2P_*` environment values into an options struct.
 - `rp2p_serve_index()` - starts the index server. Blocking, never returns on success.
 - `rp2p_deregister()` - removes one host from an index using the stored key.
+- `rp2p_list_publishers()` - lists active publisher IDs registered in an index.
 - `rp2p_connect()` - opens a local TCP listener or UDP bridge and creates one peer session per accepted local client or datagram source.
 - `rp2p_wait()` - registers one host, waits for incoming punch requests, and bridges each session to one local TCP backend or UDP socket.
 - `rp2p_set_pow()` - configures the registration proof difficulty.
@@ -245,8 +266,8 @@ UDP is used only between peers for hole-punch probes, keepalives, and direct pay
 | `RP2P_CTRTOK_REGISTER:id` | `RP2P_CTRTOK_CHALLENGE:nonce:bits` |
 | `RP2P_CTRTOK_REGISTER:id:RP2P_CTRTOK_SOLUTION:<hex>:RP2P_CTRTOK_PROOF:<hex>` | `RP2P_CTRTOK_OK:RP2P_CTRTOK_KEY:<hex>` or `RP2P_CTRTOK_AUTH_FAILED` |
 | `RP2P_CTRTOK_DEREGISTER:id:RP2P_CTRTOK_KEY:<hex>` | `RP2P_CTRTOK_OK` |
-| `RP2P_CTRTOK_LIST` | `RP2P_CTRTOK_PEER:id\n...RP2P_CTRTOK_END` |
-| `RP2P_CTRTOK_LOOKUP:id` | `RP2P_CTRTOK_PEER:id` or `RP2P_CTRTOK_NOT_FOUND` |
+| `RP2P_CTRTOK_LIST_PUBLISHERS` | `RP2P_CTRTOK_PUBLISHER:id\n...RP2P_CTRTOK_END` |
+| `RP2P_CTRTOK_LOOKUP:id` | `RP2P_CTRTOK_PUBLISHER:id` or `RP2P_CTRTOK_NOT_FOUND` |
 | `RP2P_CTRTOK_PUNCH_REQ2:me:target:session\nRP2P_CTRTOK_CAND:...\nRP2P_CTRTOK_END` | `RP2P_CTRTOK_PUNCH_OK2:target:session\nRP2P_CTRTOK_CAND:...\nRP2P_CTRTOK_END` to initiator |
 | forwarded by index | `RP2P_CTRTOK_PUNCH_CALL2:me:session\nRP2P_CTRTOK_CAND:...\nRP2P_CTRTOK_END` to target |
 | `RP2P_CTRTOK_PUNCH_PING:...` | Direct peer STUN-like probe (UDP) |
@@ -289,7 +310,7 @@ Anyone can attempt a registration and occupy a seat. PoW prevents casual or scri
 It does not stop a determined attacker (e.g. a botnet), but it raises the cost of filling the peer table from near-zero to hours of CPU time.
 
 Each new publisher registration receives a random 8-byte nonce and must answer a challenge using a proof derived from `nonce_hex || self_id || solution_hex`.
-The proof is always HMAC-SHA256 keyed by `RP2P_PASS`. On a public index, `RP2P_PASS` is the empty string. Heartbeats from already-registered peers skip the challenge.
+The proof is always HMAC-SHA256 keyed by `RP2P_PASS`. On a public index, `RP2P_PASS` is the empty string. Heartbeats from already-registered publishers skip the challenge.
 
 ### Wire
 
@@ -319,7 +340,7 @@ RP2P_PASS='global' RP2P_VIP='web webpass admin adminpass' rp2p idx 9876
 | `RP2P_VIP='id pass id pass ...'` | Reserved seat passwords parsed as whitespace-separated `<id> <pass>` pairs. |
 | `RP2P_SWEEP=32` | UDP port sweep range used during punch fallback. |
 | `RP2P_STUN=stun:host:port` | Optional STUN server used to discover `srflx` automatically. |
-| `RP2P_SEATS=1024` | Max announced peers on the index server (overridden by `--max`). |
+| `RP2P_SEATS=1024` | Max announced publishers on the index server (overridden by `--max`). |
 
 Internal debug-only environment knobs used for fault-injection tests:
 

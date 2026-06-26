@@ -97,6 +97,17 @@ typedef void (*rp2p_signal_callback_t)(rp2p_t *ctx);
 typedef void (*rp2p_peer_cb)(const char *id, const char *addr,
     unsigned short port, void *userdata);
 
+/**
+ * Publisher listing callback.
+ * @param id Publisher identifier registered in the index.
+ * @param userdata Caller-owned pointer passed through unchanged.
+ * @return None.
+ */
+typedef void (*rp2p_publisher_cb)(
+const char *id,
+void *userdata
+);
+
 typedef struct {
     int sig;
     rp2p_signal_callback_t cb;
@@ -180,6 +191,19 @@ rp2p_t *ctx,
 const char *index_host,
 unsigned short index_port,
 const char *id
+);
+
+/**
+ * CLIENT: List publishers registered in an index server over TCP.
+ * Calls cb once for each active publisher id returned by the index.
+ * @return RP2P_OK on success, or a negative error code.
+ */
+int rp2p_list_publishers(
+rp2p_t *ctx,
+const char *index_host,
+unsigned short index_port,
+rp2p_publisher_cb cb,
+void *userdata
 );
 
 int rp2p_on_signal(

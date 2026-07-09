@@ -11,7 +11,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
-#include "rp2p.h"
+#include "librp2p.h"
 #include "monocypher.h"
 
 #include <errno.h>

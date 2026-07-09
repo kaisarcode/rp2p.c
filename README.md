@@ -203,7 +203,7 @@ sessions may fail instead of degrading to a relay.
 Start an index server:
 
 ```c
-#include "rp2p.h"
+#include "librp2p.h"
 
 rp2p_t *ctx;
 rp2p_open(&ctx);
@@ -219,7 +219,7 @@ rp2p_close(ctx);
 List publishers currently registered in an index. Publishers are services registered by `rp2p set`; consumers are clients that use `rp2p con` to look up and connect to those services.
 
 ```c
-#include "rp2p.h"
+#include "librp2p.h"
 
 #include <stdio.h>
 

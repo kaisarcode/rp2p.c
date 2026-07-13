@@ -13,8 +13,45 @@ XDG_DATA_HOME ?= $(HOME)/.local/share
 OSXCROSS_ROOT ?= $(XDG_DATA_HOME)/osxcross/target
 MACOSX_DEPLOYMENT_TARGET ?= 11.0
 IOS_DEPLOYMENT_TARGET ?= 13.0
-IPHONEOS_SDK ?= $(shell ls -d "$(OSXCROSS_ROOT)"/SDK/iPhoneOS*.sdk 2>/dev/null | sort -V | tail -n 1)
-IPHONESIMULATOR_SDK ?= $(shell ls -d "$(OSXCROSS_ROOT)"/SDK/iPhoneSimulator*.sdk 2>/dev/null | sort -V | tail -n 1)
+DETECTED_MACOSX_SDK := $(shell ls -d "$(OSXCROSS_ROOT)"/SDK/MacOSX*.sdk 2>/dev/null | sort -V | tail -n 1)
+DETECTED_IPHONEOS_SDK := $(shell ls -d "$(OSXCROSS_ROOT)"/SDK/iPhoneOS*.sdk 2>/dev/null | sort -V | tail -n 1)
+DETECTED_IPHONESIMULATOR_SDK := $(shell ls -d "$(OSXCROSS_ROOT)"/SDK/iPhoneSimulator*.sdk 2>/dev/null | sort -V | tail -n 1)
+MACOSX_SDK ?= $(DETECTED_MACOSX_SDK)
+IPHONEOS_SDK ?= $(DETECTED_IPHONEOS_SDK)
+IPHONESIMULATOR_SDK ?= $(DETECTED_IPHONESIMULATOR_SDK)
+ifeq ($(origin MACOSX_SDK), environment)
+override MACOSX_SDK := $(DETECTED_MACOSX_SDK)
+endif
+ifeq ($(strip $(MACOSX_SDK)),)
+override MACOSX_SDK := $(DETECTED_MACOSX_SDK)
+endif
+ifneq ($(origin MACOSX_SDK), command line)
+ifeq ($(wildcard $(MACOSX_SDK)),)
+override MACOSX_SDK := $(DETECTED_MACOSX_SDK)
+endif
+endif
+ifeq ($(origin IPHONEOS_SDK), environment)
+override IPHONEOS_SDK := $(DETECTED_IPHONEOS_SDK)
+endif
+ifeq ($(strip $(IPHONEOS_SDK)),)
+override IPHONEOS_SDK := $(DETECTED_IPHONEOS_SDK)
+endif
+ifneq ($(origin IPHONEOS_SDK), command line)
+ifeq ($(wildcard $(IPHONEOS_SDK)),)
+override IPHONEOS_SDK := $(DETECTED_IPHONEOS_SDK)
+endif
+endif
+ifeq ($(origin IPHONESIMULATOR_SDK), environment)
+override IPHONESIMULATOR_SDK := $(DETECTED_IPHONESIMULATOR_SDK)
+endif
+ifeq ($(strip $(IPHONESIMULATOR_SDK)),)
+override IPHONESIMULATOR_SDK := $(DETECTED_IPHONESIMULATOR_SDK)
+endif
+ifneq ($(origin IPHONESIMULATOR_SDK), command line)
+ifeq ($(wildcard $(IPHONESIMULATOR_SDK)),)
+override IPHONESIMULATOR_SDK := $(DETECTED_IPHONESIMULATOR_SDK)
+endif
+endif
 OSXCROSS_X86_64_CC := $(OSXCROSS_ROOT)/bin/o64-clang
 OSXCROSS_AARCH64_CC := $(OSXCROSS_ROOT)/bin/oa64-clang
 OSXCROSS_IOS_AARCH64_CC := $(OSXCROSS_ROOT)/bin/ios64-clang
@@ -286,7 +323,7 @@ define ios_target
 		exit 1; \
 	fi
 	@cache=$(BUILD_DIR)/$(1)-$(2)/CMakeCache.txt && \
-	if [ -f "$$cache" ] && ! grep -q '^CMAKE_C_COMPILER:.*=$(3)$$' "$$cache"; then \
+	if [ -f "$$cache" ] && { ! grep -q '^CMAKE_C_COMPILER:.*=$(3)$$' "$$cache" || ! grep -q '^CMAKE_OSX_SYSROOT:.*=$(5)$$' "$$cache"; }; then \
 		rm -f "$$cache" $(BUILD_DIR)/$(1)-$(2)/build.ninja && rm -rf $(BUILD_DIR)/$(1)-$(2)/CMakeFiles; \
 	fi
 	@if [ ! -f $(BUILD_DIR)/$(1)-$(2)/build.ninja ]; then \
@@ -329,6 +366,10 @@ x86_64/iossim:
 
 define android_target
 	@mkdir -p $(BIN_DIR)/$(1)/android
+	@cache=$(BUILD_DIR)/$(1)-android/CMakeCache.txt && \
+	if [ -f "$$cache" ] && { ! grep -q '^CMAKE_TOOLCHAIN_FILE:.*=$(NDK_TOOLCHAIN)$$' "$$cache" || ! grep -q '^ANDROID_ABI:.*=$(2)$$' "$$cache"; }; then \
+		rm -f "$$cache" $(BUILD_DIR)/$(1)-android/build.ninja && rm -rf $(BUILD_DIR)/$(1)-android/CMakeFiles; \
+	fi
 	@if [ ! -f $(BUILD_DIR)/$(1)-android/CMakeCache.txt ]; then \
 		cmake -S . -B $(BUILD_DIR)/$(1)-android \
 			-DCMAKE_BUILD_TYPE=Release \

@@ -523,7 +523,7 @@ int main(int argc, char **argv) {
 
         if (proto == 0 || listen_port == 0) { fprintf(stderr, "rp2p: con requires --tcp <port> or --udp <port>\n"); rp2p_options_free(&opts); return 1; }
 
-        snprintf(self_id, sizeof(self_id), "c-%d", (int)getpid());
+        snprintf(self_id, sizeof(self_id), "c%d", (int)getpid());
 
         if (rp2p_open(&ctx) != RP2P_OK) { fprintf(stderr, "rp2p: failed to create context\n"); rp2p_options_free(&opts); return 1; }
         if (rp2p_set_secret(ctx, opts.secret) != RP2P_OK) {

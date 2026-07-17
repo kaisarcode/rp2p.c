@@ -77,6 +77,13 @@ Publish to a protected index:
 RP2P_PASS='password' rp2p set web@idx.example.com:9876 --tcp 8080
 ```
 
+Authenticate the direct tunnel on both peers with a separate secret:
+
+```bash
+RP2P_SECRET='tunnel-secret' rp2p set web@idx.example.com:9876 --tcp 8080
+RP2P_SECRET='tunnel-secret' rp2p con web@idx.example.com:9876 --tcp 9000
+```
+
 Expose that remote TCP service locally on `127.0.0.1:9000`:
 
 ```bash
@@ -158,7 +165,7 @@ If nobody has announced `game`, then `rp2p con game@idx.example.com:9876` fails 
 The form `game@idx.example.com` is **not** a URL; you cannot open it in a browser, ping it, or connect to it directly.
 It only has meaning inside rp2p commands to refer to a registered host on a specific index.
 
-IDs may contain only ASCII letters and digits (`A-Z`, `a-z`, `0-9`). Password tokens used by `RP2P_PASS` and `RP2P_VIP` are restricted to terminal-safe bytes: letters, digits, and `._-+=,:@%/`.
+IDs may contain only ASCII letters and digits (`A-Z`, `a-z`, `0-9`). Password and secret tokens used by `RP2P_PASS`, `RP2P_SECRET`, and `RP2P_VIP` are restricted to terminal-safe bytes: letters, digits, and `._-+=,:@%/`.
 
 `RP2P_VIP` is parsed as whitespace-separated `<id> <pass>` pairs, so spaces, tabs, newlines, and blank lines are all treated the same after trimming the full string.
 
@@ -171,13 +178,13 @@ It does **not** bind UDP, perform NAT discovery, relay UDP, or carry application
 The inter-peer data channel is **UDP-based**.
 By default it tries direct UDP hole punching first.
 In `--tcp` mode, RP2P wraps that UDP path in an internal encrypted reliable stream so local TCP applications still see ordered, reconstructable, full-duplex byte semantics.
-Each TCP client session performs a fresh ephemeral key exchange with the remote peer before application data flows, and those session keys are discarded when the session ends.
+Each TCP client session performs a fresh ephemeral key exchange with the remote peer before application data flows, and those session keys are discarded when the session ends. When `RP2P_SECRET` is nonempty on both peers, authenticated HELLO frames and secret-bound key derivation prevent an unauthenticated peer from completing the handshake.
 The `--tcp` and `--udp` flags control how data enters and leaves the tunnel on each end:
 
 | Flag | Publisher side | Consumer side |
 | :--- | :--- | :--- |
 | `--tcp` | Connects to local TCP service → chunks into RP2P encrypted reliable stream frames → sends through UDP hole-punch tunnel | Receives RP2P encrypted reliable stream frames → reconstructs ordered byte stream → writes to local TCP client |
-| `--udp` | Receives from local UDP service → forwards directly through hole-punch tunnel | Receives from hole-punch tunnel → forwards directly to local UDP client |
+| `--udp` | Receives from local UDP service → optionally encrypts and authenticates each datagram → sends through hole-punch tunnel | Authenticates, rejects replays, optionally decrypts, and forwards to the local UDP client |
 
 `rp2p con` creates a local TCP or UDP listener on `127.0.0.1:<listen_port>`. This listener acts as a transparent bridge to the remote service.
 You never connect directly to the remote machine; every connection or datagram goes to `127.0.0.1:<listen_port>`, and rp2p forwards it through
@@ -210,6 +217,7 @@ rp2p_open(&ctx);
 
 rp2p_set_pow(ctx, 0);
 rp2p_set_pass(ctx, "password");
+rp2p_set_secret(ctx, "tunnel-secret");
 
 rp2p_serve_index(ctx, "0.0.0.0", 9876);
 
@@ -248,6 +256,7 @@ rp2p_close(ctx);
 - `rp2p_wait()` - registers one host, waits for incoming punch requests, and bridges each session to one local TCP backend or UDP socket.
 - `rp2p_set_pow()` - configures the registration proof difficulty.
 - `rp2p_set_pass()` - configures the shared password used to derive registration proofs.
+- `rp2p_set_secret()` - configures independent peer tunnel authentication and UDP payload encryption.
 - `rp2p_set_port()` - sets the local service or bridge port used by `set`/`con`.
 - `rp2p_set_protocol()` - selects TCP or UDP mode before `rp2p_wait()` or `rp2p_connect()`.
 - `rp2p_set_sweep()` - sets the UDP port sweep range used during punch fallback.
@@ -281,10 +290,11 @@ In `--tcp` mode only, peers run an internal session protocol over the selected U
 - Each accepted local TCP client gets its own `session_id`.
 - Each session generates a fresh ephemeral keypair on both sides.
 - Peers exchange ephemeral public keys before application data flows.
+- With `RP2P_SECRET`, HELLO frames are authenticated and session keys are bound to the shared secret.
 - Session keys are derived per direction and discarded when the session closes.
 - DATA frames are encrypted and authenticated.
 - Ordering, retransmission, duplicate suppression, and stream reconstruction happen inside RP2P.
-- `--udp` mode does not use this layer and keeps plain datagram semantics.
+- `--udp` mode preserves datagram boundaries. With `RP2P_SECRET`, each datagram uses AEAD with directional sequence nonces and a 64-packet replay window. With an empty secret, datagrams remain plaintext.
 
 Internal TCP stream frame types:
 
@@ -337,6 +347,7 @@ RP2P_PASS='global' RP2P_VIP='web webpass admin adminpass' rp2p idx 9876
 | :--- | :--- |
 | `RP2P_POW=0` | PoW bits for index registration (overridden by `--pow` flag). |
 | `RP2P_PASS=password` | Optional shared password used to protect server registration. |
+| `RP2P_SECRET=secret` | Optional independent secret for peer authentication, UDP AEAD, and replay protection. Both peers must use the same value. |
 | `RP2P_VIP='id pass id pass ...'` | Reserved seat passwords parsed as whitespace-separated `<id> <pass>` pairs. |
 | `RP2P_SWEEP=32` | UDP port sweep range used during punch fallback. |
 | `RP2P_STUN=stun:host:port` | Optional STUN server used to discover `srflx` automatically. |
@@ -348,7 +359,7 @@ Internal debug-only environment knobs used for fault-injection tests:
 - `RP2P_DEBUG_STREAM_DROP_EVERY=N` drops every Nth TCP stream DATA frame once.
 - `RP2P_DEBUG_STREAM_REORDER_EVERY=N` delays every Nth TCP stream DATA frame once so the next frame arrives first.
 
-`RP2P_INDEX` and `RP2P_BIND` are parsed by the options loader internally, but the current CLI still requires explicit positional arguments for the index address and explicit command flags for bind behavior.
+Index addresses and local ports are always explicit CLI arguments. `RP2P_INDEX` and `RP2P_BIND` are not supported.
 
 When `RP2P_VIP` defines a password for one seat, that seat must use its VIP password and no longer accepts the global `RP2P_PASS`. VIP seats are reserved at index startup and keep their place even while offline.
 Seats not listed in `RP2P_VIP` still use the global `RP2P_PASS`, but they may only occupy the non-VIP capacity left after VIP reservations.
@@ -381,7 +392,7 @@ rp2p_set_pass(ctx, "password");
 | 28 | 268M | ~50s | ~8min | ~1h |
 | 32 | 4G | ~15min | ~2h | ~24h |
 
-`RP2P_PASS` only controls who may register services in the index. It does not authenticate consumers, encrypt tunnel traffic, or replace application-level authentication.
+`RP2P_PASS` only controls who may register services in the index. `RP2P_SECRET` independently authenticates direct TCP tunnel handshakes and encrypts raw UDP payloads. Neither replaces application-level authorization where the exposed service requires user identities or access policy.
 
 ---
 
@@ -396,7 +407,7 @@ rp2p_set_pass(ctx, "password");
 - `con --tcp <port>` exposes a local TCP listener on `127.0.0.1:<port>`.
 - Each accepted local TCP client creates a separate peer session.
 - The publisher can serve multiple consumers concurrently.
-- `--udp` mode forwards UDP datagrams directly through the tunnel with no protocol conversion, ordering, or retransmission.
+- `--udp` mode preserves datagram boundaries and adds authenticated encryption plus replay rejection when `RP2P_SECRET` is set. It does not add ordering or retransmission.
 - `--stun` is opt-in and used only for endpoint discovery. It does not carry application payloads.
 - RP2P does not implement TURN or relay application traffic through the index or other third-party servers.
 - On restrictive NATs where direct UDP connectivity cannot be established, some sessions may fail by design rather than fall back to relayed transport.

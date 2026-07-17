@@ -22,6 +22,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -69,6 +70,49 @@ typedef int rp2p_fd_t;
 #  define SOCKET_ERROR       (-1)
 #endif
 
+#define RP2P_SWEEP_MAX   1024
+#define RP2P_POW_MAX      32
+#define RP2P_PORT_MIN      1
+#define RP2P_PORT_MAX      65535
+#define RP2P_POW_CHALLENGE_TTL_S 120
+
+/**
+ * Parses one strict unsigned decimal integer.
+ * Summary: Rejects NULL, empty, leading/trailing garbage, signs, and overflow.
+ * @param text    Input text to parse.
+ * @param min     Inclusive lower bound.
+ * @param max     Inclusive upper bound.
+ * @param out     Output parsed value.
+ * @return 1 on valid parse within bounds, 0 otherwise.
+ */
+static int rp2p_parse_u(const char *text, long min, long max, long *out) {
+    char *end;
+    long val;
+
+    if (!text || !text[0] || !out) return 0;
+    errno = 0;
+    val = strtol(text, &end, 10);
+    if (errno != 0) return 0;
+    if (*end != '\0') return 0;
+    if (val < min || val > max) return 0;
+    *out = val;
+    return 1;
+}
+
+/**
+ * Parses one strict environment numeric option.
+ * Summary: Applies the same validation as CLI parsing.
+ * @param text    Input text to parse.
+ * @param min     Inclusive lower bound.
+ * @param max     Inclusive upper bound.
+ * @param out     Output parsed value.
+ * @return 1 on valid parse within bounds, 0 otherwise.
+ */
+static int rp2p_parse_env(const char *text, long min, long max, long *out) {
+    if (!text || text[0] == '\0') return 0;
+    return rp2p_parse_u(text, min, max, out);
+}
+
 #define RP2P_ETIMEOUT_SEC     15
 #define RP2P_HALFCLOSE_S       2
 #define RP2P_DISCONNECT_S     10
@@ -82,6 +126,8 @@ typedef int rp2p_fd_t;
 #define RP2P_STREAM_VERSION    1u
 #define RP2P_STREAM_SESSION_ID_SZ 16
 #define RP2P_STREAM_HELLO_NONCE_SZ 16
+#define RP2P_STREAM_HELLO_BASE_SZ 72
+#define RP2P_STREAM_HELLO_TAG_SZ 16
 #define RP2P_STREAM_KEY_SZ     32
 #define RP2P_STREAM_TAG_SZ     16
 #define RP2P_STREAM_NONCE_SZ   24
@@ -90,6 +136,8 @@ typedef int rp2p_fd_t;
 #define RP2P_STREAM_SEND_WINDOW 64
 #define RP2P_STREAM_RECV_WINDOW 64
 #define RP2P_STREAM_RTO_MS     700
+#define RP2P_STREAM_RTO_MIN_MS 200
+#define RP2P_STREAM_RTO_MAX_MS 5000
 #define RP2P_STREAM_ACK_MS     120
 #define RP2P_STREAM_HELLO_MS   500
 #define RP2P_STREAM_IDLE_MS    20000
@@ -168,6 +216,10 @@ typedef int rp2p_fd_t;
 
 #define RP2P_STREAM_DIR_C2S    1u
 #define RP2P_STREAM_DIR_S2C    2u
+#define RP2P_UDP_MAGIC         0x50445552u
+#define RP2P_UDP_VERSION       1u
+#define RP2P_UDP_HEADER_SZ     24
+#define RP2P_UDP_TAG_SZ        16
 
 typedef struct {
     uint8_t type;
@@ -220,6 +272,7 @@ typedef struct {
 
 typedef struct {
     int ready;
+    int authenticated;
     unsigned char local_secret[32];
     unsigned char local_public[32];
     unsigned char peer_public[32];
@@ -227,6 +280,7 @@ typedef struct {
     unsigned char peer_nonce[RP2P_STREAM_HELLO_NONCE_SZ];
     unsigned char tx_key[RP2P_STREAM_KEY_SZ];
     unsigned char rx_key[RP2P_STREAM_KEY_SZ];
+    unsigned char psk[RP2P_STREAM_KEY_SZ];
 } rp2p_stream_crypto_t;
 
 typedef struct {
@@ -265,7 +319,21 @@ typedef struct {
     uint64_t last_tx_ms;
     uint64_t last_ack_ms;
     uint64_t last_hello_ms;
+    uint64_t srtt_ms;
+    uint64_t rttvar_ms;
+    uint64_t rto_ms;
 } rp2p_stream_state_t;
+
+typedef struct {
+    int enabled;
+    uint8_t tx_direction;
+    uint8_t rx_direction;
+    unsigned char key[32];
+    unsigned char session_id[8];
+    uint64_t tx_seq;
+    uint64_t rx_max;
+    uint64_t rx_window;
+} rp2p_udp_crypto_t;
 
 typedef struct {
     int used;
@@ -282,8 +350,16 @@ typedef struct {
 static rp2p_t **g_signal_ctx_list = NULL;
 static int g_signal_ctx_cap = 0;
 static int g_signal_ctx_count = 0;
+#ifdef _WIN32
+static SRWLOCK g_signal_mutex = SRWLOCK_INIT;
+#else
+static pthread_mutex_t g_signal_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+static volatile sig_atomic_t g_signal_pending_no = 0;
+static volatile sig_atomic_t g_signal_pending = 0;
 
 static int rp2p_is_stop_requested(rp2p_t *ctx);
+static int rp2p_fdset_add(rp2p_fd_t fd, fd_set *set, int *maxfd);
 
 typedef struct {
     uint32_t state[8];
@@ -400,6 +476,7 @@ typedef struct {
     char id[RP2P_ID_MAX + 1];
     struct sockaddr_storage addr;
     uint64_t issued_at;
+    uint64_t expires_at;
 } rp2p_pow_challenge_t;
 
 /**
@@ -559,11 +636,15 @@ static int rp2p_verify_register_pow(const char *pass, const char *nonce_hex,
 {
     unsigned char hash[32];
     char expected[65];
+    int diff, k;
 
     if (!proof_hex || strlen(proof_hex) != 64) return 0;
     rp2p_hash_register_once(pass, nonce_hex, id, solution_hex, hash);
     if (!rp2p_hex_encode(hash, sizeof(hash), expected, sizeof(expected))) return 0;
-    if (strcmp(proof_hex, expected) != 0) return 0;
+    diff = 0;
+    for (k = 0; k < 64; k++)
+        diff |= (proof_hex[k] ^ expected[k]);
+    if (diff != 0) return 0;
     return rp2p_count_leading_zero_bits(hash) >= bits;
 }
 
@@ -605,6 +686,11 @@ typedef struct {
     char pass[RP2P_PASS_MAX + 1];
 } rp2p_vip_entry_t;
 
+typedef struct {
+    int sig;
+    rp2p_signal_callback_t cb;
+} rp2p_signal_entry_t;
+
 /**
  * Pending punch.
  * Summary: Tracks a two-round punch request awaiting ACK2 from publisher.
@@ -634,8 +720,10 @@ struct rp2p {
     int vips_cap;
     char key[RP2P_KEY_STR_SZ];
     char pass[RP2P_PASS_MAX + 1];
+    char secret[RP2P_SECRET_MAX + 1];
     int pow_bits;
     unsigned short bind_port;
+    int explicit_port;
     int proto;
     int sweep;
     rp2p_pow_challenge_t pow_challenges[RP2P_POW_CHALLENGES_MAX];
@@ -646,9 +734,15 @@ struct rp2p {
     pthread_mutex_t mutex;
 #endif
     char stun_url[512];
+    char err_buf[256];
+    int fault_drop_counter;
+    int fault_reorder_counter;
+    rp2p_stream_drop_record_t fault_dropped[256];
+    rp2p_stream_drop_record_t fault_delayed[256];
+    rp2p_stream_pending_frame_t fault_pending;
     rp2p_pending_punch_t pending_punches[RP2P_MAX_PENDING_PUNCHES];
     int n_pending_punches;
-    volatile sig_atomic_t stop_requested;
+    _Atomic int stop_requested;
 };
 
 /**
@@ -657,7 +751,7 @@ struct rp2p {
  * @return 1 when stop was requested, 0 otherwise.
  */
 static int rp2p_is_stop_requested(rp2p_t *ctx) {
-    return ctx && ctx->stop_requested;
+    return ctx && atomic_load(&ctx->stop_requested);
 }
 
 typedef struct rp2p_udp_consumer_session {
@@ -670,6 +764,7 @@ typedef struct rp2p_udp_consumer_session {
     int active;
     int is_tcp;
     rp2p_stream_state_t stream;
+    rp2p_udp_crypto_t udp_crypto;
 } rp2p_udp_consumer_session_t;
 
 typedef struct rp2p_udp_server_session {
@@ -681,6 +776,7 @@ typedef struct rp2p_udp_server_session {
     int active;
     int is_tcp;
     rp2p_stream_state_t stream;
+    rp2p_udp_crypto_t udp_crypto;
 } rp2p_udp_server_session_t;
 
 #ifdef _WIN32
@@ -710,15 +806,10 @@ static uint32_t rp2p_load_u32_le(const unsigned char *p);
  * @return 1 when stream debug logging is enabled, 0 otherwise.
  */
 static int rp2p_stream_debug_enabled(void) {
-    static int loaded = 0;
-    static int enabled = 0;
     const char *env;
 
-    if (loaded) return enabled;
     env = getenv("RP2P_DEBUG_STREAM");
-    enabled = env && env[0] != '\0' && strcmp(env, "0") != 0;
-    loaded = 1;
-    return enabled;
+    return env && env[0] != '\0' && strcmp(env, "0") != 0;
 }
 
 /**
@@ -739,16 +830,12 @@ static void rp2p_stream_log(const char *fmt, ...) {
  * @return Drop cadence, or 0 when disabled.
  */
 static int rp2p_stream_debug_drop_every(void) {
-    static int loaded = 0;
-    static int every = 0;
     const char *env;
+    long every;
 
-    if (loaded) return every;
     env = getenv("RP2P_DEBUG_STREAM_DROP_EVERY");
-    if (env && env[0] != '\0') every = atoi(env);
-    if (every < 0) every = 0;
-    loaded = 1;
-    return every;
+    if (!rp2p_parse_u(env, 1, 1000000, &every)) return 0;
+    return (int)every;
 }
 
 /**
@@ -756,25 +843,21 @@ static int rp2p_stream_debug_drop_every(void) {
  * @return Reorder cadence, or 0 when disabled.
  */
 static int rp2p_stream_debug_reorder_every(void) {
-    static int loaded = 0;
-    static int every = 0;
     const char *env;
+    long every;
 
-    if (loaded) return every;
     env = getenv("RP2P_DEBUG_STREAM_REORDER_EVERY");
-    if (env && env[0] != '\0') every = atoi(env);
-    if (every < 0) every = 0;
-    loaded = 1;
-    return every;
+    if (!rp2p_parse_u(env, 1, 1000000, &every)) return 0;
+    return (int)every;
 }
 
 /**
  * Decides whether to drop one outgoing DATA frame once for testing.
  * @return 1 when the frame should be dropped, 0 otherwise.
  */
-static int rp2p_stream_should_drop_once(const unsigned char *buf, size_t len) {
-    static int counter = 0;
-    static rp2p_stream_drop_record_t dropped[256];
+static int rp2p_stream_should_drop_once(rp2p_t *ctx,
+    const unsigned char *buf, size_t len)
+{
     int every;
     uint8_t type;
     uint32_t seq;
@@ -790,21 +873,21 @@ static int rp2p_stream_should_drop_once(const unsigned char *buf, size_t len) {
     seq = rp2p_load_u32_le(buf + 24);
     free_slot = -1;
     for (i = 0; i < 256; i++) {
-        if (!dropped[i].used) {
+        if (!ctx->fault_dropped[i].used) {
             if (free_slot < 0) free_slot = i;
             continue;
         }
-        if (dropped[i].seq == seq &&
-            memcmp(dropped[i].session_id, buf + 8,
+        if (ctx->fault_dropped[i].seq == seq &&
+            memcmp(ctx->fault_dropped[i].session_id, buf + 8,
                 RP2P_STREAM_SESSION_ID_SZ) == 0)
             return 0;
     }
-    counter++;
-    if ((counter % every) != 0) return 0;
-    if (free_slot < 0) free_slot = counter % 256;
-    dropped[free_slot].used = 1;
-    dropped[free_slot].seq = seq;
-    memcpy(dropped[free_slot].session_id, buf + 8,
+    ctx->fault_drop_counter++;
+    if ((ctx->fault_drop_counter % every) != 0) return 0;
+    if (free_slot < 0) free_slot = ctx->fault_drop_counter % 256;
+    ctx->fault_dropped[free_slot].used = 1;
+    ctx->fault_dropped[free_slot].seq = seq;
+    memcpy(ctx->fault_dropped[free_slot].session_id, buf + 8,
         RP2P_STREAM_SESSION_ID_SZ);
     rp2p_stream_log("rp2p: stream drop-test seq=%u\n", (unsigned)seq);
     return 1;
@@ -814,9 +897,9 @@ static int rp2p_stream_should_drop_once(const unsigned char *buf, size_t len) {
  * Decides whether to delay one DATA frame for reordering tests.
  * @return 1 when the frame should be delayed, 0 otherwise.
  */
-static int rp2p_stream_should_reorder_once(const unsigned char *buf, size_t len) {
-    static int counter = 0;
-    static rp2p_stream_drop_record_t delayed[256];
+static int rp2p_stream_should_reorder_once(rp2p_t *ctx,
+    const unsigned char *buf, size_t len)
+{
     int every;
     uint8_t type;
     uint32_t seq;
@@ -832,21 +915,21 @@ static int rp2p_stream_should_reorder_once(const unsigned char *buf, size_t len)
     seq = rp2p_load_u32_le(buf + 24);
     free_slot = -1;
     for (i = 0; i < 256; i++) {
-        if (!delayed[i].used) {
+        if (!ctx->fault_delayed[i].used) {
             if (free_slot < 0) free_slot = i;
             continue;
         }
-        if (delayed[i].seq == seq &&
-            memcmp(delayed[i].session_id, buf + 8,
+        if (ctx->fault_delayed[i].seq == seq &&
+            memcmp(ctx->fault_delayed[i].session_id, buf + 8,
                 RP2P_STREAM_SESSION_ID_SZ) == 0)
             return 0;
     }
-    counter++;
-    if ((counter % every) != 0) return 0;
-    if (free_slot < 0) free_slot = counter % 256;
-    delayed[free_slot].used = 1;
-    delayed[free_slot].seq = seq;
-    memcpy(delayed[free_slot].session_id, buf + 8,
+    ctx->fault_reorder_counter++;
+    if ((ctx->fault_reorder_counter % every) != 0) return 0;
+    if (free_slot < 0) free_slot = ctx->fault_reorder_counter % 256;
+    ctx->fault_delayed[free_slot].used = 1;
+    ctx->fault_delayed[free_slot].seq = seq;
+    memcpy(ctx->fault_delayed[free_slot].session_id, buf + 8,
         RP2P_STREAM_SESSION_ID_SZ);
     rp2p_stream_log("rp2p: stream reorder-test seq=%u\n", (unsigned)seq);
     return 1;
@@ -877,6 +960,30 @@ static void rp2p_unlock(rp2p_t *ctx) {
 }
 
 /**
+ * Lock global signal state.
+ * @return None.
+ */
+static void rp2p_global_lock(void) {
+#ifdef _WIN32
+    AcquireSRWLockExclusive(&g_signal_mutex);
+#else
+    pthread_mutex_lock(&g_signal_mutex);
+#endif
+}
+
+/**
+ * Unlock global signal state.
+ * @return None.
+ */
+static void rp2p_global_unlock(void) {
+#ifdef _WIN32
+    ReleaseSRWLockExclusive(&g_signal_mutex);
+#else
+    pthread_mutex_unlock(&g_signal_mutex);
+#endif
+}
+
+/**
  * Loads one little-endian u16.
  * @return Decoded value.
  */
@@ -893,6 +1000,19 @@ static uint32_t rp2p_load_u32_le(const unsigned char *p) {
         ((uint32_t)p[1] << 8) |
         ((uint32_t)p[2] << 16) |
         ((uint32_t)p[3] << 24);
+}
+
+/**
+ * Loads one little-endian u64.
+ * @return Decoded value.
+ */
+static uint64_t rp2p_load_u64_le(const unsigned char *p) {
+    uint64_t value;
+    int i;
+
+    value = 0;
+    for (i = 7; i >= 0; i--) value = (value << 8) | p[i];
+    return value;
 }
 
 /**
@@ -913,6 +1033,19 @@ static void rp2p_store_u32_le(unsigned char *p, uint32_t v) {
     p[1] = (unsigned char)((v >> 8) & 0xffu);
     p[2] = (unsigned char)((v >> 16) & 0xffu);
     p[3] = (unsigned char)((v >> 24) & 0xffu);
+}
+
+/**
+ * Stores one little-endian u64.
+ * @return None.
+ */
+static void rp2p_store_u64_le(unsigned char *p, uint64_t value) {
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        p[i] = (unsigned char)(value & 0xffu);
+        value >>= 8;
+    }
 }
 
 /**
@@ -1091,7 +1224,7 @@ static uint16_t rp2p_stream_advertised_window(const rp2p_stream_state_t *st) {
  */
 static void rp2p_stream_init(rp2p_stream_state_t *st, int initiator,
     const unsigned char session_id[RP2P_STREAM_SESSION_ID_SZ],
-    const char *session_hex)
+    const char *session_hex, const char *secret)
 {
     memset(st, 0, sizeof(*st));
     st->enabled = 1;
@@ -1111,6 +1244,12 @@ static void rp2p_stream_init(rp2p_stream_state_t *st, int initiator,
     st->last_tx_ms = st->last_rx_ms;
     st->last_ack_ms = st->last_rx_ms;
     st->last_hello_ms = 0;
+    st->rto_ms = RP2P_STREAM_RTO_MS;
+    if (secret && secret[0]) {
+        crypto_blake2b(st->crypto.psk, sizeof(st->crypto.psk),
+            (const unsigned char *)secret, strlen(secret));
+        st->crypto.authenticated = 1;
+    }
 }
 
 /**
@@ -1120,29 +1259,31 @@ static void rp2p_stream_init(rp2p_stream_state_t *st, int initiator,
 static int rp2p_stream_send_raw(rp2p_t *ctx, rp2p_fd_t fd,
     const struct sockaddr_storage *peer_addr, const unsigned char *buf, size_t len)
 {
-    static rp2p_stream_pending_frame_t pending;
     socklen_t peer_len;
 
-    (void)ctx;
+    if (!ctx) return -1;
     if (len > RP2P_STREAM_MAX_FRAME) return -1;
     peer_len = rp2p_sockaddr_len(peer_addr);
     if (peer_len == 0) return -1;
 
-    if (rp2p_stream_should_drop_once(buf, len)) return 0;
-    if (!pending.used && rp2p_stream_should_reorder_once(buf, len)) {
-        pending.used = 1;
-        pending.len = len;
-        memcpy(pending.frame, buf, len);
+    if (rp2p_stream_should_drop_once(ctx, buf, len)) return 0;
+    if (!ctx->fault_pending.used &&
+        rp2p_stream_should_reorder_once(ctx, buf, len))
+    {
+        ctx->fault_pending.used = 1;
+        ctx->fault_pending.len = len;
+        memcpy(ctx->fault_pending.frame, buf, len);
         return 0;
     }
     if (sendto(fd, (const char *)buf, len, 0,
         (const struct sockaddr *)peer_addr, peer_len) < 0)
         return -1;
-    if (pending.used) {
-        if (sendto(fd, (const char *)pending.frame, pending.len, 0,
+    if (ctx->fault_pending.used) {
+        if (sendto(fd, (const char *)ctx->fault_pending.frame,
+            ctx->fault_pending.len, 0,
             (const struct sockaddr *)peer_addr, peer_len) < 0)
             return -1;
-        pending.used = 0;
+        ctx->fault_pending.used = 0;
     }
     return 0;
 }
@@ -1194,6 +1335,7 @@ static void rp2p_stream_derive_key(unsigned char out[32], const unsigned char sh
  */
 static int rp2p_stream_crypto_ready(rp2p_stream_state_t *st) {
     unsigned char shared[32];
+    unsigned char raw_shared[32];
     unsigned char kdf[112];
     size_t kdf_len;
 
@@ -1203,7 +1345,18 @@ static int rp2p_stream_crypto_ready(rp2p_stream_state_t *st) {
         return 0;
     if (crypto_verify32(st->crypto.local_public, st->crypto.peer_public) == 0)
         return 0;
-    crypto_x25519(shared, st->crypto.local_secret, st->crypto.peer_public);
+    crypto_x25519(raw_shared, st->crypto.local_secret,
+        st->crypto.peer_public);
+    if (memcmp(raw_shared, (unsigned char[32]){0}, sizeof(raw_shared)) == 0) {
+        crypto_wipe(raw_shared, sizeof(raw_shared));
+        return 0;
+    }
+    if (st->crypto.authenticated) {
+        crypto_blake2b_keyed(shared, sizeof(shared), st->crypto.psk,
+            sizeof(st->crypto.psk), raw_shared, sizeof(raw_shared));
+    } else {
+        memcpy(shared, raw_shared, sizeof(shared));
+    }
     rp2p_stream_build_kdf_input(kdf, &kdf_len, st);
     if (st->initiator) {
         rp2p_stream_derive_key(st->crypto.tx_key, shared, kdf, kdf_len, "c2s");
@@ -1216,6 +1369,7 @@ static int rp2p_stream_crypto_ready(rp2p_stream_state_t *st) {
     st->ready = 1;
     rp2p_stream_log("rp2p: tcp session %s stream ready\n", st->session_hex);
     crypto_wipe(shared, sizeof(shared));
+    crypto_wipe(raw_shared, sizeof(raw_shared));
     crypto_wipe(kdf, sizeof(kdf));
     return 1;
 }
@@ -1261,30 +1415,59 @@ static int rp2p_stream_can_send_data(const rp2p_stream_state_t *st) {
 static size_t rp2p_stream_pack_hello(uint8_t type, const rp2p_stream_state_t *st,
     unsigned char *out)
 {
+    unsigned char tag[RP2P_STREAM_HELLO_TAG_SZ];
+
     rp2p_store_u32_le(out, RP2P_STREAM_MAGIC);
     out[4] = RP2P_STREAM_VERSION;
     out[5] = type;
     out[6] = st->tx_direction;
-    out[7] = 0;
+    out[7] = st->crypto.authenticated ? 1 : 0;
     memcpy(out + 8, st->session_id, RP2P_STREAM_SESSION_ID_SZ);
     memcpy(out + 24, st->crypto.local_public, 32);
     memcpy(out + 56, st->crypto.local_nonce, RP2P_STREAM_HELLO_NONCE_SZ);
-    return 72;
+    if (!st->crypto.authenticated) return RP2P_STREAM_HELLO_BASE_SZ;
+    crypto_blake2b_keyed(tag, sizeof(tag), st->crypto.psk,
+        sizeof(st->crypto.psk), out, RP2P_STREAM_HELLO_BASE_SZ);
+    memcpy(out + RP2P_STREAM_HELLO_BASE_SZ, tag, sizeof(tag));
+    crypto_wipe(tag, sizeof(tag));
+    return RP2P_STREAM_HELLO_BASE_SZ + RP2P_STREAM_HELLO_TAG_SZ;
 }
 
 /**
  * Parses one plaintext hello frame.
  * @return 1 on success, 0 on mismatch.
  */
-static int rp2p_stream_unpack_hello(const unsigned char *buf, size_t len,
+static int rp2p_stream_unpack_hello(const rp2p_stream_state_t *st,
+    const unsigned char *buf, size_t len,
     uint8_t *type, uint8_t *direction,
     unsigned char session_id[RP2P_STREAM_SESSION_ID_SZ],
     unsigned char peer_public[32],
     unsigned char peer_nonce[RP2P_STREAM_HELLO_NONCE_SZ])
 {
-    if (len < 72) return 0;
+    unsigned char tag[RP2P_STREAM_HELLO_TAG_SZ];
+    int has_auth;
+
+    if (len < RP2P_STREAM_HELLO_BASE_SZ) return 0;
     if (rp2p_load_u32_le(buf) != RP2P_STREAM_MAGIC) return 0;
     if (buf[4] != RP2P_STREAM_VERSION) return 0;
+    if ((buf[7] & ~1u) != 0) return 0;
+    has_auth = (buf[7] & 1) != 0;
+    if (has_auth != st->crypto.authenticated) return 0;
+    if (has_auth) {
+        if (len != RP2P_STREAM_HELLO_BASE_SZ + RP2P_STREAM_HELLO_TAG_SZ)
+            return 0;
+        crypto_blake2b_keyed(tag, sizeof(tag), st->crypto.psk,
+            sizeof(st->crypto.psk), buf, RP2P_STREAM_HELLO_BASE_SZ);
+        if (crypto_verify16(tag,
+            buf + RP2P_STREAM_HELLO_BASE_SZ) != 0)
+        {
+            crypto_wipe(tag, sizeof(tag));
+            return 0;
+        }
+        crypto_wipe(tag, sizeof(tag));
+    } else if (len != RP2P_STREAM_HELLO_BASE_SZ) {
+        return 0;
+    }
     *type = buf[5];
     *direction = buf[6];
     memcpy(session_id, buf + 8, RP2P_STREAM_SESSION_ID_SZ);
@@ -1325,6 +1508,7 @@ static int rp2p_stream_unpack_header(const unsigned char *buf, size_t len,
     if (len < 60) return 0;
     if (rp2p_load_u32_le(buf) != RP2P_STREAM_MAGIC) return 0;
     if (buf[4] != RP2P_STREAM_VERSION) return 0;
+    if (buf[7] != 0) return 0;
     hdr->type = buf[5];
     hdr->direction = buf[6];
     memcpy(hdr->session_id, buf + 8, RP2P_STREAM_SESSION_ID_SZ);
@@ -1334,6 +1518,9 @@ static int rp2p_stream_unpack_header(const unsigned char *buf, size_t len,
     hdr->payload_len = rp2p_load_u16_le(buf + 34);
     hdr->gap_start = rp2p_load_u32_le(buf + 36);
     hdr->gap_end = rp2p_load_u32_le(buf + 40);
+    if (hdr->type < RP2P_STREAM_TYPE_DATA ||
+        hdr->type > RP2P_STREAM_TYPE_PONG || hdr->seq == 0)
+        return 0;
     if ((size_t)(60 + hdr->payload_len) > len) return 0;
     return 1;
 }
@@ -1376,6 +1563,151 @@ static int rp2p_stream_decrypt_packet(rp2p_stream_state_t *st,
     rp2p_stream_nonce(nonce, hdr->session_id, hdr->direction, hdr->seq);
     return crypto_aead_unlock(plain, mac, st->crypto.rx_key, nonce, buf,
         ad_len, cipher, hdr->payload_len) == 0;
+}
+
+/**
+ * Initializes raw UDP authentication state for one rendezvous session.
+ * @return 1 on success, 0 on invalid input.
+ */
+static int rp2p_udp_crypto_init(rp2p_udp_crypto_t *state,
+    const char *secret, const char *session_token, int initiator)
+{
+    unsigned char secret_key[32];
+    unsigned char material[RP2P_CTRL_SESSION_MAX + 16];
+    size_t token_len;
+
+    memset(state, 0, sizeof(*state));
+    if (!secret || !secret[0]) return 1;
+    if (!session_token) return 0;
+    token_len = strlen(session_token);
+    if (token_len == 0 || token_len > RP2P_CTRL_SESSION_MAX) return 0;
+    memcpy(material, "rp2p-udp-v1:", 12);
+    memcpy(material + 12, session_token, token_len);
+    crypto_blake2b(secret_key, sizeof(secret_key),
+        (const unsigned char *)secret, strlen(secret));
+    crypto_blake2b_keyed(state->key, sizeof(state->key), secret_key,
+        sizeof(secret_key), material, 12 + token_len);
+    crypto_blake2b(state->session_id, sizeof(state->session_id), material,
+        12 + token_len);
+    state->enabled = 1;
+    state->tx_direction = initiator ? RP2P_STREAM_DIR_C2S :
+        RP2P_STREAM_DIR_S2C;
+    state->rx_direction = initiator ? RP2P_STREAM_DIR_S2C :
+        RP2P_STREAM_DIR_C2S;
+    state->tx_seq = 1;
+    crypto_wipe(secret_key, sizeof(secret_key));
+    crypto_wipe(material, sizeof(material));
+    return 1;
+}
+
+/**
+ * Builds one raw UDP AEAD nonce.
+ * @return None.
+ */
+static void rp2p_udp_nonce(unsigned char nonce[24],
+    const rp2p_udp_crypto_t *state, uint8_t direction, uint64_t seq)
+{
+    memset(nonce, 0, 24);
+    memcpy(nonce, state->session_id, sizeof(state->session_id));
+    nonce[8] = direction;
+    rp2p_store_u64_le(nonce + 16, seq);
+}
+
+/**
+ * Records one authenticated sequence in the replay window.
+ * @return 1 for a new sequence, 0 for stale or duplicate input.
+ */
+static int rp2p_udp_replay_accept(rp2p_udp_crypto_t *state, uint64_t seq) {
+    uint64_t delta;
+
+    if (seq == 0) return 0;
+    if (seq > state->rx_max) {
+        delta = seq - state->rx_max;
+        state->rx_window = delta >= 64 ? 1 :
+            (state->rx_window << delta) | 1;
+        state->rx_max = seq;
+        return 1;
+    }
+    delta = state->rx_max - seq;
+    if (delta >= 64 || (state->rx_window & ((uint64_t)1 << delta)) != 0)
+        return 0;
+    state->rx_window |= (uint64_t)1 << delta;
+    return 1;
+}
+
+/**
+ * Encrypts one raw UDP payload when tunnel security is enabled.
+ * @return Encoded length, or zero on overflow.
+ */
+static size_t rp2p_udp_encrypt(rp2p_udp_crypto_t *state,
+    const unsigned char *plain, size_t plain_len, unsigned char *out,
+    size_t out_cap)
+{
+    unsigned char nonce[24];
+    uint64_t seq;
+
+    if (!state->enabled) {
+        if (plain_len > out_cap) return 0;
+        memcpy(out, plain, plain_len);
+        return plain_len;
+    }
+    if (out_cap < RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ ||
+        plain_len > out_cap - RP2P_UDP_HEADER_SZ - RP2P_UDP_TAG_SZ)
+        return 0;
+    if (state->tx_seq == 0) return 0;
+    seq = state->tx_seq++;
+    rp2p_store_u32_le(out, RP2P_UDP_MAGIC);
+    out[4] = RP2P_UDP_VERSION;
+    out[5] = state->tx_direction;
+    out[6] = 0;
+    out[7] = 0;
+    memcpy(out + 8, state->session_id, sizeof(state->session_id));
+    rp2p_store_u64_le(out + 16, seq);
+    rp2p_udp_nonce(nonce, state, state->tx_direction, seq);
+    crypto_aead_lock(out + RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ,
+        out + RP2P_UDP_HEADER_SZ, state->key, nonce, out,
+        RP2P_UDP_HEADER_SZ, plain, plain_len);
+    return RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ + plain_len;
+}
+
+/**
+ * Authenticates and decrypts one raw UDP payload with replay rejection.
+ * @return Plaintext length, or zero on malformed, stale, or forged input.
+ */
+static size_t rp2p_udp_decrypt(rp2p_udp_crypto_t *state,
+    const unsigned char *packet, size_t packet_len, unsigned char *plain,
+    size_t plain_cap)
+{
+    unsigned char nonce[24];
+    size_t plain_len;
+    uint64_t seq;
+
+    if (!state->enabled) {
+        if (packet_len > plain_cap) return 0;
+        memcpy(plain, packet, packet_len);
+        return packet_len;
+    }
+    if (packet_len < RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ) return 0;
+    if (rp2p_load_u32_le(packet) != RP2P_UDP_MAGIC ||
+        packet[4] != RP2P_UDP_VERSION ||
+        packet[5] != state->rx_direction || packet[6] != 0 || packet[7] != 0)
+        return 0;
+    if (memcmp(packet + 8, state->session_id,
+        sizeof(state->session_id)) != 0)
+        return 0;
+    plain_len = packet_len - RP2P_UDP_HEADER_SZ - RP2P_UDP_TAG_SZ;
+    if (plain_len > plain_cap) return 0;
+    seq = rp2p_load_u64_le(packet + 16);
+    rp2p_udp_nonce(nonce, state, state->rx_direction, seq);
+    if (crypto_aead_unlock(plain, packet + RP2P_UDP_HEADER_SZ, state->key,
+        nonce, packet, RP2P_UDP_HEADER_SZ,
+        packet + RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ, plain_len) != 0)
+        return 0;
+    if (!rp2p_udp_replay_accept(state, seq)) {
+        crypto_wipe(plain, plain_len);
+        return 0;
+    }
+    return plain_len;
 }
 
 /**
@@ -1426,9 +1758,37 @@ static rp2p_stream_send_slot_t *rp2p_stream_alloc_send_slot(
  * @return None.
  */
 static void rp2p_stream_ack_until(rp2p_stream_state_t *st, uint32_t ack) {
+    uint64_t now;
     int i;
+    int sampled;
+
+    now = rp2p_now_ms();
+    sampled = 0;
     for (i = 0; i < RP2P_STREAM_SEND_WINDOW; i++) {
         if (st->out.slots[i].used && st->out.slots[i].seq <= ack) {
+            if (!sampled && st->out.slots[i].attempts == 1 &&
+                now >= st->out.slots[i].last_tx_ms)
+            {
+                uint64_t sample = now - st->out.slots[i].last_tx_ms;
+                uint64_t delta;
+
+                if (sample == 0) sample = 1;
+                if (st->srtt_ms == 0) {
+                    st->srtt_ms = sample;
+                    st->rttvar_ms = sample / 2;
+                } else {
+                    delta = st->srtt_ms > sample ? st->srtt_ms - sample :
+                        sample - st->srtt_ms;
+                    st->rttvar_ms = (3 * st->rttvar_ms + delta) / 4;
+                    st->srtt_ms = (7 * st->srtt_ms + sample) / 8;
+                }
+                st->rto_ms = st->srtt_ms + 4 * st->rttvar_ms;
+                if (st->rto_ms < RP2P_STREAM_RTO_MIN_MS)
+                    st->rto_ms = RP2P_STREAM_RTO_MIN_MS;
+                if (st->rto_ms > RP2P_STREAM_RTO_MAX_MS)
+                    st->rto_ms = RP2P_STREAM_RTO_MAX_MS;
+                sampled = 1;
+            }
             if (st->out.slots[i].type == RP2P_STREAM_TYPE_FIN)
                 st->out.fin_acked = 1;
             st->out.slots[i].used = 0;
@@ -1629,11 +1989,12 @@ static int rp2p_stream_process_packet(rp2p_t *ctx, rp2p_fd_t fd,
     unsigned char hello_pub[32];
     unsigned char hello_nonce[RP2P_STREAM_HELLO_NONCE_SZ];
 
-    if (rp2p_stream_unpack_hello(buf, len, &hello_type, &hello_dir,
+    if (rp2p_stream_unpack_hello(st, buf, len, &hello_type, &hello_dir,
         hello_sid, hello_pub, hello_nonce))
     {
         if ((hello_type == RP2P_STREAM_TYPE_HELLO ||
             hello_type == RP2P_STREAM_TYPE_HELLO_ACK) &&
+            hello_dir == st->rx_direction &&
             memcmp(hello_sid, st->session_id, RP2P_STREAM_SESSION_ID_SZ) == 0)
         {
             memcpy(st->crypto.peer_public, hello_pub, 32);
@@ -1794,7 +2155,7 @@ static int rp2p_stream_tick(rp2p_t *ctx, rp2p_fd_t fd,
             if (shift > RP2P_STREAM_RTO_BACKOFF_SHIFT)
                 shift = RP2P_STREAM_RTO_BACKOFF_SHIFT;
             backoff = 1u << shift;
-            if (now - slot->last_tx_ms < RP2P_STREAM_RTO_MS * backoff)
+            if (now - slot->last_tx_ms < st->rto_ms * backoff)
                 continue;
         }
         if (slot->attempts >= RP2P_STREAM_MAX_RETRIES) {
@@ -1864,6 +2225,8 @@ static void rp2p_server_session_close(rp2p_udp_server_session_t *sess) {
         sess->tcp_fd = RP2P_FD_INVALID;
     }
     if (sess->is_tcp) rp2p_stream_wipe(&sess->stream);
+    if (!sess->is_tcp) crypto_wipe(&sess->udp_crypto,
+        sizeof(sess->udp_crypto));
     sess->active = 0;
 }
 
@@ -1882,25 +2245,38 @@ static void rp2p_consumer_session_close(rp2p_udp_consumer_session_t *sess) {
         sess->fd = RP2P_FD_INVALID;
     }
     if (sess->is_tcp) rp2p_stream_wipe(&sess->stream);
+    if (!sess->is_tcp) crypto_wipe(&sess->udp_crypto,
+        sizeof(sess->udp_crypto));
     sess->active = 0;
 }
 
 /**
  * Signal handler.
- * @return Status code.
+ * Summary: Async-signal-safe. Records only the pending signal number; the
+ *          actual callback dispatch happens in the main loops via
+ *          rp2p_dispatch_pending_signals.
+ * @return None.
  */
 static void rp2p_signal_handler(int sig) {
+    g_signal_pending_no = (sig_atomic_t)sig;
+    g_signal_pending = 1;
+}
+
+/**
+ * Dispatches one pending signal to all registered contexts.
+ * Summary: Must be called only from non-async-signal context.
+ * @return None.
+ */
+static void rp2p_dispatch_pending_signals(void) {
     int i;
-    int handled = 0;
+    int sig;
+    if (!g_signal_pending) return;
+    sig = (int)g_signal_pending_no;
+    g_signal_pending = 0;
     for (i = 0; i < g_signal_ctx_count; i++) {
-        if (g_signal_ctx_list[i] &&
-            rp2p_raise_signal(g_signal_ctx_list[i], sig) > 0)
-            handled = 1;
+        if (g_signal_ctx_list[i])
+            rp2p_raise_signal(g_signal_ctx_list[i], sig);
     }
-    if (handled)
-        return;
-    signal(sig, SIG_DFL);
-    raise(sig);
 }
 
 /**
@@ -1971,16 +2347,18 @@ int rp2p_raise_signal(rp2p_t *ctx, int sig) {
 int rp2p_listen_signals(rp2p_t *ctx) {
     rp2p_t **new_list;
     if (!ctx) return RP2P_ERROR;
+    rp2p_global_lock();
     if (g_signal_ctx_count >= g_signal_ctx_cap) {
         int new_cap = g_signal_ctx_cap ? g_signal_ctx_cap * 2 : 4;
         new_list = (rp2p_t **)realloc(
             g_signal_ctx_list,
             (size_t)new_cap * sizeof(rp2p_t *));
-        if (!new_list) return RP2P_ERROR;
+        if (!new_list) { rp2p_global_unlock(); return RP2P_ERROR; }
         g_signal_ctx_list = new_list;
         g_signal_ctx_cap = new_cap;
     }
     g_signal_ctx_list[g_signal_ctx_count++] = ctx;
+    rp2p_global_unlock();
     return RP2P_OK;
 }
 
@@ -2269,7 +2647,7 @@ int rp2p_send_recv(
     if (!recv_buf || recv_cap == 0) return RP2P_OK;
 
     FD_ZERO(&fds);
-    FD_SET(fd, &fds);
+    rp2p_fdset_add(fd, &fds, NULL);
     tv.tv_sec = timeout_sec;
     tv.tv_usec = 0;
 
@@ -2285,8 +2663,30 @@ int rp2p_send_recv(
 }
 
 /**
- * Create socket.
- * @return 0 on success, -1 on error.
+ * Adds one descriptor to one select set with descriptor-range validation.
+ * Summary: Rejects descriptors that cannot be represented by fd_set.
+ * @param fd    Descriptor to add.
+ * @param set   Select set to update.
+ * @param maxfd Current maximum descriptor, updated on success.
+ * @return 1 when added, 0 when rejected.
+ */
+static int rp2p_fdset_add(rp2p_fd_t fd, fd_set *set, int *maxfd) {
+#ifdef _WIN32
+    (void)maxfd;
+    if (fd == INVALID_SOCKET) return 0;
+    if ((int)set->fd_count >= FD_SETSIZE) return 0;
+#else
+    if (fd < 0) return 0;
+    if (fd >= FD_SETSIZE) return 0;
+    if (maxfd && (int)fd > *maxfd) *maxfd = (int)fd;
+#endif
+    FD_SET(fd, set);
+    return 1;
+}
+
+/**
+ * Creates one UDP or TCP socket bound to one local address.
+ * @return Valid descriptor, or RP2P_FD_INVALID on failure.
  */
 rp2p_fd_t rp2p_create_socket(
     const char *bind_host,
@@ -2513,7 +2913,7 @@ static int rp2p_tcp_readline(rp2p_fd_t fd, char *buf, int cap, int timeout_sec) 
         struct timeval tv;
 
         FD_ZERO(&fds);
-        FD_SET(fd, &fds);
+        rp2p_fdset_add(fd, &fds, NULL);
         tv.tv_sec = (timeout_sec > 0 && total == 0) ? timeout_sec : 1;
         tv.tv_usec = 0;
 
@@ -2794,7 +3194,8 @@ int rp2p_open(rp2p_t **out) {
     ctx->signal_capacity = 0;
     ctx->pass[0] = '\0';
     ctx->pow_bits = 0;
-    ctx->bind_port = RP2P_BIND_PORT_DEFAULT;
+    ctx->bind_port = 0;
+    ctx->explicit_port = 0;
     ctx->proto = RP2P_PROTO_TCP;
     ctx->n_pow_challenges = 0;
     ctx->conns = NULL;
@@ -2821,6 +3222,7 @@ int rp2p_open(rp2p_t **out) {
 int rp2p_close(rp2p_t *ctx) {
     int i;
     if (!ctx) return RP2P_ERROR;
+    rp2p_global_lock();
     for (i = 0; i < g_signal_ctx_count; i++) {
         if (g_signal_ctx_list[i] == ctx) {
             g_signal_ctx_list[i] =
@@ -2828,6 +3230,7 @@ int rp2p_close(rp2p_t *ctx) {
             break;
         }
     }
+    rp2p_global_unlock();
     for (i = 0; i < ctx->n_conns; i++)
         RP2P_FD_CLOSE(ctx->conns[i].fd);
     free(ctx->conns);
@@ -2850,8 +3253,16 @@ int rp2p_close(rp2p_t *ctx) {
  */
 int rp2p_stop(rp2p_t *ctx) {
     if (!ctx) return RP2P_ERROR;
-    ctx->stop_requested = 1;
+    atomic_store(&ctx->stop_requested, 1);
     return RP2P_OK;
+}
+
+/**
+ * Checks whether one context was requested to stop.
+ * @return Nonzero if a stop was requested, zero otherwise.
+ */
+int rp2p_stop_requested(rp2p_t *ctx) {
+    return ctx && atomic_load(&ctx->stop_requested);
 }
 
 /**
@@ -2871,59 +3282,66 @@ const char *rp2p_strerror(int code) {
 }
 
 /**
- * Options t.
- * @return Status code.
+ * Records one per-context detail error message.
+ * @return None.
+ */
+void rp2p_set_error(rp2p_t *ctx, const char *fmt, ...) {
+    va_list ap;
+    if (!ctx) return;
+    if (!fmt) { ctx->err_buf[0] = '\0'; return; }
+    va_start(ap, fmt);
+    vsnprintf(ctx->err_buf, sizeof(ctx->err_buf), fmt, ap);
+    va_end(ap);
+    ctx->err_buf[sizeof(ctx->err_buf) - 1] = '\0';
+}
+
+/**
+ * Returns the last per-context detail error message.
+ * @return Pointer to a caller-owned message string, or empty string.
+ */
+const char *rp2p_get_error(rp2p_t *ctx) {
+    if (!ctx) return "";
+    return ctx->err_buf;
+}
+
+/**
+ * Returns one caller-owned options struct with safe defaults.
+ * Summary: Index port and sweep are populated; callers own the returned struct.
+ * @return Default options struct.
  */
 rp2p_options_t rp2p_options_default(void) {
     rp2p_options_t opts;
     memset(&opts, 0, sizeof(opts));
-    opts.index_port = RP2P_PORT_DEFAULT;
+    opts.seats = RP2P_MAX_PEERS;
     opts.pow = 0;
     opts.sweep = 20;
     return opts;
 }
 
 /**
- * Options load env.
+ * Loads RP2P_* environment values into one options struct with strict rules.
+ * Summary: Invalid numeric values are ignored and defaults are retained.
+ * Initialize with rp2p_options_default and free with rp2p_options_free.
+ * @param opts Options struct to populate.
  * @return None.
  */
 void rp2p_options_load_env(rp2p_options_t *opts) {
     const char *val;
-    char *colon;
+    long num;
 
     if (!opts) return;
 
-    val = getenv("RP2P_INDEX");
-    if (val) {
-        colon = strchr(val, ':');
-        if (colon) {
-            size_t len = (size_t)(colon - val);
-            if (len >= sizeof(opts->index_host))
-                len = sizeof(opts->index_host) - 1;
-            memcpy(opts->index_host, val, len);
-            opts->index_host[len] = '\0';
-            opts->index_port = (unsigned short)atoi(colon + 1);
-        }
-    }
-
-    val = getenv("RP2P_BIND");
-    if (val) {
-        colon = strchr(val, ':');
-        if (colon) {
-            size_t len = (size_t)(colon - val);
-            if (len >= sizeof(opts->bind_addr))
-                len = sizeof(opts->bind_addr) - 1;
-            memcpy(opts->bind_addr, val, len);
-            opts->bind_addr[len] = '\0';
-            opts->bind_port = (unsigned short)atoi(colon + 1);
-        }
-    }
-
     val = getenv("RP2P_SEATS");
-    if (val) opts->seats = atoi(val);
+    if (val && rp2p_parse_env(val, 0, RP2P_MAX_PEERS, &num))
+        opts->seats = (int)num;
 
     val = getenv("RP2P_POW");
-    if (val) opts->pow = atoi(val);
+    if (val && rp2p_parse_env(val, 0, RP2P_POW_MAX, &num))
+        opts->pow = (int)num;
+
+    val = getenv("RP2P_SWEEP");
+    if (val && rp2p_parse_env(val, 0, RP2P_SWEEP_MAX, &num))
+        opts->sweep = (int)num;
 
     val = getenv("RP2P_PASS");
     if (val) {
@@ -2931,22 +3349,25 @@ void rp2p_options_load_env(rp2p_options_t *opts) {
         opts->pass[RP2P_PASS_MAX] = '\0';
     }
 
+    val = getenv("RP2P_SECRET");
+    if (val) {
+        strncpy(opts->secret, val, RP2P_SECRET_MAX);
+        opts->secret[RP2P_SECRET_MAX] = '\0';
+    }
+
     val = getenv("RP2P_VIP");
     if (val) {
         size_t len = strlen(val);
+        free(opts->vip);
         opts->vip = (char *)malloc(len + 1);
         if (opts->vip) memcpy(opts->vip, val, len + 1);
     }
-
-    val = getenv("RP2P_SWEEP");
-    if (val) opts->sweep = atoi(val);
 
     val = getenv("RP2P_STUN");
     if (val) {
         strncpy(opts->stun_url, val, sizeof(opts->stun_url) - 1);
         opts->stun_url[sizeof(opts->stun_url) - 1] = '\0';
     }
-
 }
 
 /**
@@ -2979,17 +3400,22 @@ int rp2p_set_seats(rp2p_t *ctx, int seats) {
 int rp2p_set_pow(rp2p_t *ctx, int bits) {
     if (!ctx) return RP2P_ERROR;
     if (bits < 0) bits = 0;
+    if (bits > RP2P_POW_MAX) bits = RP2P_POW_MAX;
     ctx->pow_bits = bits;
     return RP2P_OK;
 }
 
 /**
- * Set port.
+ * Configures the local service or listener port used by set and con.
+ * Summary: Marks the port as explicit for precedence over arguments.
+ * @param ctx  Open context.
+ * @param port Local bind port.
  * @return 0 on success, -1 on error.
  */
 int rp2p_set_port(rp2p_t *ctx, unsigned short port) {
     if (!ctx) return RP2P_ERROR;
     ctx->bind_port = port;
+    ctx->explicit_port = 1;
     return RP2P_OK;
 }
 
@@ -3011,7 +3437,32 @@ int rp2p_set_protocol(rp2p_t *ctx, int proto) {
  */
 int rp2p_set_sweep(rp2p_t *ctx, int sweep) {
     if (!ctx) return RP2P_ERROR;
+    if (sweep < 0) sweep = 0;
+    if (sweep > RP2P_SWEEP_MAX) sweep = RP2P_SWEEP_MAX;
     ctx->sweep = sweep;
+    return RP2P_OK;
+}
+
+/**
+ * Resolves the effective local port for set or con.
+ * Summary: A nonzero argument overrides a default context port, while a nonzero
+ * argument conflicting with an explicitly set context port is rejected.
+ * @param ctx        Open context.
+ * @param arg_port  Port argument from rp2p_wait or rp2p_connect.
+ * @param out        Effective port output.
+ * @return RP2P_OK on success, RP2P_ERROR on conflicting ports.
+ */
+static int rp2p_resolve_port(rp2p_t *ctx, unsigned short arg_port,
+    unsigned short *out)
+{
+    if (arg_port == 0) {
+        *out = ctx->bind_port;
+        return RP2P_OK;
+    }
+    if (ctx->explicit_port && ctx->bind_port != 0 &&
+        ctx->bind_port != arg_port)
+        return RP2P_ERROR;
+    *out = arg_port;
     return RP2P_OK;
 }
 
@@ -3026,6 +3477,20 @@ int rp2p_set_pass(rp2p_t *ctx, const char *pass) {
     if (pass[0] && !rp2p_is_valid_pass_token(pass)) return RP2P_ERROR;
     strncpy(ctx->pass, pass, RP2P_PASS_MAX);
     ctx->pass[RP2P_PASS_MAX] = '\0';
+    return RP2P_OK;
+}
+
+/**
+ * Stores the shared tunnel authentication secret.
+ * @param ctx    Open context.
+ * @param secret Shared tunnel secret string.
+ * @return 0 on success, -1 on error.
+ */
+int rp2p_set_secret(rp2p_t *ctx, const char *secret) {
+    if (!ctx || !secret) return RP2P_ERROR;
+    if (secret[0] && !rp2p_is_valid_pass_token(secret)) return RP2P_ERROR;
+    strncpy(ctx->secret, secret, RP2P_SECRET_MAX);
+    ctx->secret[RP2P_SECRET_MAX] = '\0';
     return RP2P_OK;
 }
 
@@ -3249,6 +3714,23 @@ static void rp2p_remove_pow_challenge(rp2p_t *ctx, int idx) {
 }
 
 /**
+ * Evicts expired pending register challenges.
+ * @param ctx Open context.
+ * @param now Current monotonic time in seconds.
+ * @return None.
+ */
+static void rp2p_evict_pow_challenges(rp2p_t *ctx, uint64_t now) {
+    int i;
+
+    if (!ctx) return;
+    for (i = ctx->n_pow_challenges - 1; i >= 0; i--) {
+        if (ctx->pow_challenges[i].expires_at != 0 &&
+            now >= ctx->pow_challenges[i].expires_at)
+            rp2p_remove_pow_challenge(ctx, i);
+    }
+}
+
+/**
  * Stores one pending register challenge.
  * @param ctx       Open context.
  * @param peer_sa   Remote peer address.
@@ -3282,6 +3764,8 @@ static int rp2p_store_pow_challenge(rp2p_t *ctx,
     ctx->pow_challenges[idx].id[RP2P_ID_MAX] = '\0';
     ctx->pow_challenges[idx].addr = *peer_sa;
     ctx->pow_challenges[idx].issued_at = rp2p_now_s();
+    ctx->pow_challenges[idx].expires_at =
+        ctx->pow_challenges[idx].issued_at + RP2P_POW_CHALLENGE_TTL_S;
     return 1;
 }
 
@@ -3309,7 +3793,13 @@ static int rp2p_format_register_ok(rp2p_t *ctx, const char *id,
  * Conn add.
  * @return 0 on success, -1 on error.
  */
-static int rp2p_conn_add(rp2p_t *ctx, int fd) {
+static int rp2p_conn_add(rp2p_t *ctx, rp2p_fd_t fd) {
+#ifdef _WIN32
+    if (fd == INVALID_SOCKET) return RP2P_ERROR;
+#else
+    if (fd < 0) return RP2P_ERROR;
+    if (fd >= FD_SETSIZE) { RP2P_FD_CLOSE(fd); return RP2P_ERROR; }
+#endif
     if (ctx->n_conns >= ctx->conns_cap) {
         int new_cap = ctx->conns_cap == 0 ? 64 : ctx->conns_cap * 2;
         rp2p_tcp_conn_t *c = (rp2p_tcp_conn_t *)realloc(
@@ -4316,7 +4806,7 @@ static int rp2p_stun_binding(rp2p_t *ctx, int udp_fd,
     if (sendto(udp_fd, (const char *)tx, (size_t)off, 0,
         (const struct sockaddr *)&srv, srv_len) < 0) return -1;
 
-    FD_ZERO(&rfds); FD_SET(udp_fd, &rfds);
+    FD_ZERO(&rfds); rp2p_fdset_add(udp_fd, &rfds, NULL);
     tv.tv_sec = 3; tv.tv_usec = 0;
     n = select(udp_fd + 1, &rfds, NULL, NULL, &tv);
     if (n <= 0) return -1;
@@ -4513,7 +5003,7 @@ static int rp2p_punch_wait_response(int udp_fd, const char *session_id,
     if (remaining_ms > wait_ms) remaining_ms = wait_ms;
     if (remaining_ms <= 0) return RP2P_ETIMEOUT;
     FD_ZERO(&readfds);
-    FD_SET(udp_fd, &readfds);
+    rp2p_fdset_add(udp_fd, &readfds, NULL);
     tv.tv_sec = remaining_ms / 1000;
     tv.tv_usec = (remaining_ms % 1000) * 1000;
     if (select(udp_fd + 1, &readfds, NULL, NULL, &tv) <= 0)
@@ -4687,12 +5177,14 @@ int rp2p_serve_index(
     fd_set fds;
     struct timeval tv;
     int ret, i, n;
-    int maxfd;
+    int maxfd = -1;
 
     if (!ctx) return RP2P_ERROR;
     ctx->stop_requested = 0;
-    if (rp2p_platform_init() != 0)
+    if (rp2p_platform_init() != 0) {
+        rp2p_set_error(ctx, "index: platform init failed");
         return RP2P_ENET;
+    }
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = host ? AF_UNSPEC : AF_INET6;
@@ -4704,7 +5196,12 @@ int rp2p_serve_index(
         hints.ai_family = AF_INET;
         ret = getaddrinfo(host, port_str, &hints, &ai);
     }
-    if (ret != 0) { rp2p_platform_cleanup(); return RP2P_ENET; }
+    if (ret != 0) {
+        rp2p_set_error(ctx, "index: resolve %s:%u failed (%s)",
+            host ? host : "*", (unsigned)port, gai_strerror(ret));
+        rp2p_platform_cleanup();
+        return RP2P_ENET;
+    }
     tcp_fd = RP2P_FD_INVALID;
     for (it = ai; it; it = it->ai_next) {
         tcp_fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
@@ -4724,7 +5221,12 @@ int rp2p_serve_index(
         tcp_fd = RP2P_FD_INVALID;
     }
     freeaddrinfo(ai);
-    if (RP2P_ISERR(tcp_fd)) { rp2p_platform_cleanup(); return RP2P_ENET; }
+    if (RP2P_ISERR(tcp_fd)) {
+        rp2p_set_error(ctx, "index: bind/listen %s:%u failed",
+            host ? host : "*", (unsigned)port);
+        rp2p_platform_cleanup();
+        return RP2P_ENET;
+    }
 
     rp2p_set_nonblock(tcp_fd);
 
@@ -4732,17 +5234,17 @@ int rp2p_serve_index(
         host ? host : "*", (unsigned)port);
 
     while (1) {
+        rp2p_dispatch_pending_signals();
         if (ctx->stop_requested) { fprintf(stderr, "rp2p: shutdown requested\n"); break; }
 
         FD_ZERO(&fds);
-        FD_SET(tcp_fd, &fds);
-        maxfd = (int)tcp_fd;
+        rp2p_fdset_add(tcp_fd, &fds, &maxfd);
 
         rp2p_lock(ctx);
         for (i = 0; i < ctx->n_conns; i++) {
-            FD_SET(ctx->conns[i].fd, &fds);
-            if ((int)ctx->conns[i].fd > maxfd) maxfd = (int)ctx->conns[i].fd;
+            rp2p_fdset_add(ctx->conns[i].fd, &fds, &maxfd);
         }
+        rp2p_evict_pow_challenges(ctx, rp2p_now_s());
         rp2p_unlock(ctx);
 
         tv.tv_sec = 1; tv.tv_usec = 0;
@@ -4906,9 +5408,13 @@ int rp2p_serve_index(
                                 if (rp2p_parse_register_solution(cmd_buf, id,
                                     solution, proof))
                                 {
+                                    uint64_t now_pow = rp2p_now_s();
                                     register_pass = rp2p_get_register_pass(ctx, id);
                                     cidx = rp2p_find_pow_challenge(ctx, &peer_sa);
                                     if (cidx < 0 ||
+                                        (ctx->pow_challenges[cidx].expires_at != 0 &&
+                                        now_pow >=
+                                            ctx->pow_challenges[cidx].expires_at) ||
                                         strcmp(ctx->pow_challenges[cidx].id, id) != 0 ||
                                         !rp2p_verify_register_pow(register_pass,
                                             ctx->pow_challenges[cidx].nonce_hex, id,
@@ -4933,6 +5439,10 @@ int rp2p_serve_index(
                                             RP2P_CTRTOK_ERROR_PEER_TABLE_FULL);
                                     }
                                 } else {
+                                    int cidx_fail =
+                                        rp2p_find_pow_challenge(ctx, &peer_sa);
+                                    if (cidx_fail >= 0)
+                                        rp2p_remove_pow_challenge(ctx, cidx_fail);
                                     rp2p_tcp_send(c->fd,
                                         RP2P_CTRTOK_AUTH_FAILED);
                                     continue;
@@ -5329,17 +5839,24 @@ int rp2p_wait(
     rp2p_fd_t udp_fd = RP2P_FD_INVALID;
     uint64_t last_heartbeat;
     const char *udp_any_host;
+    unsigned short eff_port;
 
-    (void)bind_port;
     if (!ctx) return RP2P_ERROR;
     ctx->stop_requested = 0;
     if (ctx->proto != RP2P_PROTO_TCP && ctx->proto != RP2P_PROTO_UDP)
         return RP2P_ERROR;
-    if (ctx->bind_port == 0) return RP2P_ERROR;
+    if (rp2p_resolve_port(ctx, bind_port, &eff_port) != RP2P_OK)
+        return RP2P_ERROR;
+    if (eff_port == 0) return RP2P_ERROR;
+    ctx->bind_port = eff_port;
     udp_any_host = rp2p_host_is_ipv6_literal(index_host) ? "::" : "0.0.0.0";
 
     control_fd = rp2p_control_connect(index_host, index_port);
-    if (RP2P_ISERR(control_fd)) return RP2P_ENET;
+    if (RP2P_ISERR(control_fd)) {
+        rp2p_set_error(ctx, "wait: control connect %s:%u failed",
+            index_host, (unsigned)index_port);
+        return RP2P_ENET;
+    }
 
     udp_fd = rp2p_create_socket(udp_any_host, 0);
     if (RP2P_ISERR(udp_fd)) { RP2P_FD_CLOSE(control_fd); return RP2P_ENET; }
@@ -5424,12 +5941,12 @@ int rp2p_wait(
         while (!ctx->stop_requested) {
             fd_set fds;
             struct timeval tv;
-            int maxfd;
+            rp2p_dispatch_pending_signals();
+    int maxfd = -1;
 
             FD_ZERO(&fds);
-            FD_SET(control_fd, &fds);
-            FD_SET(udp_fd, &fds);
-            maxfd = (int)(control_fd > udp_fd ? control_fd : udp_fd);
+            rp2p_fdset_add(control_fd, &fds, &maxfd);
+            rp2p_fdset_add(udp_fd, &fds, &maxfd);
 
             for (i = 0; i < n_sessions; i++) {
                 if (!sessions[i].active) continue;
@@ -5438,8 +5955,7 @@ int rp2p_wait(
                         !rp2p_stream_can_send_data(&sessions[i].stream) &&
                         !sessions[i].stream.out.local_eof)
                         continue;
-                    FD_SET(sessions[i].backend_fd, &fds);
-                    if ((int)sessions[i].backend_fd > maxfd) maxfd = (int)sessions[i].backend_fd;
+                    rp2p_fdset_add(sessions[i].backend_fd, &fds, &maxfd);
                 }
             }
 
@@ -5553,7 +6069,8 @@ int rp2p_wait(
                                         (unsigned)ctx->bind_port);
                                     continue;
                                 }
-                                rp2p_stream_init(&sess.stream, 0, sess_id, sess_hex);
+                                rp2p_stream_init(&sess.stream, 0, sess_id,
+                                    sess_hex, ctx->secret);
                                 if (!rp2p_stream_crypto_init(&sess.stream)) {
                                     RP2P_FD_CLOSE(sess.backend_fd);
                                     continue;
@@ -5561,6 +6078,12 @@ int rp2p_wait(
                             } else {
                                 sess.backend_fd = rp2p_create_socket(udp_any_host, 0);
                                 if (RP2P_ISERR(sess.backend_fd)) continue;
+                                if (!rp2p_udp_crypto_init(&sess.udp_crypto,
+                                    ctx->secret, remote_token, 0))
+                                {
+                                    RP2P_FD_CLOSE(sess.backend_fd);
+                                    continue;
+                                }
                             }
                             sess.active = 1;
 
@@ -5589,18 +6112,18 @@ int rp2p_wait(
             }
 
             if (FD_ISSET(udp_fd, &fds)) {
-                char buf[RP2P_BUF + 1];
+                char buf[RP2P_BUF + RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ + 1];
                 struct sockaddr_storage from;
                 socklen_t fromlen = sizeof(from);
                 int recv_flags = 0;
 #ifndef _WIN32
                 recv_flags |= MSG_TRUNC;
 #endif
-                n = (int)recvfrom(udp_fd, buf, RP2P_BUF, recv_flags,
+                n = (int)recvfrom(udp_fd, buf, sizeof(buf) - 1, recv_flags,
                     (struct sockaddr *)&from, &fromlen);
                 if (n > 0) {
 #ifndef _WIN32
-                    if ((size_t)n > RP2P_BUF) return -1;
+                    if ((size_t)n > sizeof(buf) - 1) return -1;
 #endif
                     if ((size_t)n >= sizeof(buf)) n = (int)(sizeof(buf) - 1);
                     buf[n] = '\0';
@@ -5638,11 +6161,20 @@ int rp2p_wait(
                                 }
                             } else {
                                 struct sockaddr_in backend_addr;
+                                unsigned char plain[RP2P_BUF];
+                                size_t plain_len;
+
+                                plain_len = rp2p_udp_decrypt(
+                                    &sessions[found].udp_crypto,
+                                    (const unsigned char *)buf, (size_t)n,
+                                    plain, sizeof(plain));
+                                if (plain_len == 0) continue;
                                 memset(&backend_addr, 0, sizeof(backend_addr));
                                 backend_addr.sin_family = AF_INET;
                                 backend_addr.sin_port = htons(ctx->bind_port);
                                 inet_pton(AF_INET, "127.0.0.1", &backend_addr.sin_addr);
-                                sendto(sessions[found].backend_fd, buf, (size_t)n, 0,
+                                sendto(sessions[found].backend_fd,
+                                    (const char *)plain, plain_len, 0,
                                     (const struct sockaddr *)&backend_addr, sizeof(backend_addr));
                             }
                             sessions[found].last_rx = rp2p_now_s();
@@ -5693,11 +6225,20 @@ int rp2p_wait(
                                     }
                                 } else {
                                     struct sockaddr_in backend_addr;
+                                    unsigned char plain[RP2P_BUF];
+                                    size_t plain_len;
+
+                                    plain_len = rp2p_udp_decrypt(
+                                        &sessions[unset].udp_crypto,
+                                        (const unsigned char *)buf, (size_t)n,
+                                        plain, sizeof(plain));
+                                    if (plain_len == 0) continue;
                                     memset(&backend_addr, 0, sizeof(backend_addr));
                                     backend_addr.sin_family = AF_INET;
                                     backend_addr.sin_port = htons(ctx->bind_port);
                                     inet_pton(AF_INET, "127.0.0.1", &backend_addr.sin_addr);
-                                    sendto(sessions[unset].backend_fd, buf, (size_t)n, 0,
+                                    sendto(sessions[unset].backend_fd,
+                                        (const char *)plain, plain_len, 0,
                                         (const struct sockaddr *)&backend_addr, sizeof(backend_addr));
                                 }
                             }
@@ -5723,13 +6264,20 @@ int rp2p_wait(
                     }
                 } else {
                     char buf[RP2P_BUF];
+                    unsigned char packet[RP2P_BUF + RP2P_UDP_HEADER_SZ +
+                        RP2P_UDP_TAG_SZ];
                     struct sockaddr_in bfrom;
                     socklen_t bfromlen = sizeof(bfrom);
                     n = (int)recvfrom(sessions[i].backend_fd, buf, sizeof(buf), 0,
                         (struct sockaddr *)&bfrom, &bfromlen);
                     if (n > 0) {
-                        rp2p_sendto_addr(udp_fd, buf, (size_t)n,
-                            &sessions[i].peer_addr);
+                        size_t packet_len = rp2p_udp_encrypt(
+                            &sessions[i].udp_crypto,
+                            (const unsigned char *)buf, (size_t)n, packet,
+                            sizeof(packet));
+                        if (packet_len > 0)
+                            rp2p_sendto_addr(udp_fd, packet, packet_len,
+                                &sessions[i].peer_addr);
                         sessions[i].last_rx = rp2p_now_s();
                     }
                 }
@@ -5905,11 +6453,14 @@ int rp2p_connect(
     rp2p_udp_consumer_session_t *sessions;
     const char *udp_any_host;
     int n_sessions, cap_sessions;
+    unsigned short eff_port;
 
-    (void)bind_port;
     if (!ctx) return RP2P_ERROR;
     ctx->stop_requested = 0;
-    if (ctx->bind_port == 0) return RP2P_ERROR;
+    if (rp2p_resolve_port(ctx, bind_port, &eff_port) != RP2P_OK)
+        return RP2P_ERROR;
+    if (eff_port == 0) return RP2P_ERROR;
+    ctx->bind_port = eff_port;
     if (rp2p_platform_init() != 0) return RP2P_ENET;
     udp_any_host = rp2p_host_is_ipv6_literal(index_host) ? "::" : "0.0.0.0";
 
@@ -5930,6 +6481,8 @@ int rp2p_connect(
 
     ctrl_fd = rp2p_control_connect(index_host, index_port);
     if (RP2P_ISERR(ctrl_fd)) {
+        rp2p_set_error(ctx, "connect: control connect %s:%u failed",
+            index_host, (unsigned)index_port);
         RP2P_FD_CLOSE(local_fd);
         if (!RP2P_ISERR(tcp_listen_fd)) RP2P_FD_CLOSE(tcp_listen_fd);
         rp2p_platform_cleanup();
@@ -5966,28 +6519,25 @@ int rp2p_connect(
     while (!ctx->stop_requested) {
         fd_set fds;
         struct timeval tv;
-        int maxfd;
+        rp2p_dispatch_pending_signals();
+        int maxfd = -1;
         int n, i;
 
         FD_ZERO(&fds);
-        FD_SET(local_fd, &fds);
-        maxfd = (int)local_fd;
+        rp2p_fdset_add(local_fd, &fds, &maxfd);
 
         if (!RP2P_ISERR(tcp_listen_fd)) {
-            FD_SET(tcp_listen_fd, &fds);
-            if ((int)tcp_listen_fd > maxfd) maxfd = (int)tcp_listen_fd;
+            rp2p_fdset_add(tcp_listen_fd, &fds, &maxfd);
         }
 
         for (i = 0; i < n_sessions; i++) {
             if (!sessions[i].active) continue;
-            FD_SET(sessions[i].fd, &fds);
-            if ((int)sessions[i].fd > maxfd) maxfd = (int)sessions[i].fd;
+            rp2p_fdset_add(sessions[i].fd, &fds, &maxfd);
             if (sessions[i].is_tcp && sessions[i].tcp_fd != RP2P_FD_INVALID) {
                 if (!rp2p_stream_can_send_data(&sessions[i].stream) &&
                     !sessions[i].stream.out.local_eof)
                     continue;
-                FD_SET(sessions[i].tcp_fd, &fds);
-                if ((int)sessions[i].tcp_fd > maxfd) maxfd = (int)sessions[i].tcp_fd;
+                rp2p_fdset_add(sessions[i].tcp_fd, &fds, &maxfd);
             }
         }
         tv.tv_sec = 1; tv.tv_usec = 0;
@@ -6028,7 +6578,8 @@ int rp2p_connect(
                             remote_cands, remote_cand_count,
                             &sess.fd, &sess.peer_addr, &sess) == RP2P_OK)
                         {
-                            rp2p_stream_init(&sess.stream, 1, sess_id_bin, sess_id);
+                            rp2p_stream_init(&sess.stream, 1, sess_id_bin,
+                                sess_id, ctx->secret);
                             if (!rp2p_stream_crypto_init(&sess.stream)) {
                                 RP2P_FD_CLOSE(sess.fd);
                                 RP2P_FD_CLOSE(client_fd);
@@ -6126,6 +6677,12 @@ int rp2p_connect(
                             sess.active = 1;
                             sess.is_tcp = 0;
                             sess.tcp_fd = RP2P_FD_INVALID;
+                            if (!rp2p_udp_crypto_init(&sess.udp_crypto,
+                                ctx->secret, sess_id, 1))
+                            {
+                                RP2P_FD_CLOSE(sess.fd);
+                                goto udp_skip;
+                            }
                             if (n_sessions >= cap_sessions) {
                                 int new_cap = cap_sessions == 0 ? 8 : cap_sessions * 2;
                                 rp2p_udp_consumer_session_t *new_sessions =
@@ -6141,8 +6698,15 @@ int rp2p_connect(
                 }
 udp_skip:
                 if (found >= 0) {
-                    rp2p_sendto_addr(sessions[found].fd, buf, (size_t)n,
-                        &sessions[found].peer_addr);
+                    unsigned char packet[RP2P_BUF + RP2P_UDP_HEADER_SZ +
+                        RP2P_UDP_TAG_SZ];
+                    size_t packet_len = rp2p_udp_encrypt(
+                        &sessions[found].udp_crypto,
+                        (const unsigned char *)buf, (size_t)n, packet,
+                        sizeof(packet));
+                    if (packet_len > 0)
+                        rp2p_sendto_addr(sessions[found].fd, packet,
+                            packet_len, &sessions[found].peer_addr);
                     sessions[found].last_rx = rp2p_now_s();
                 }
             }
@@ -6151,12 +6715,14 @@ udp_skip:
         for (i = 0; i < n_sessions; i++) {
             if (!sessions[i].active) continue;
             if (!FD_ISSET(sessions[i].fd, &fds)) continue;
-            char buf[RP2P_BUF];
+            char buf[RP2P_BUF + RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ];
             struct sockaddr_storage from;
             socklen_t fromlen = sizeof(from);
             n = (int)recvfrom(sessions[i].fd, buf, sizeof(buf), 0,
                 (struct sockaddr *)&from, &fromlen);
             if (n > 0) {
+                if (!rp2p_sockaddr_equal(&from, &sessions[i].peer_addr))
+                    continue;
                 if (((size_t)n >= strlen(RP2P_CTRTOK_KA) &&
                     strncmp(buf, RP2P_CTRTOK_KA,
                     strlen(RP2P_CTRTOK_KA)) == 0) ||
@@ -6181,7 +6747,13 @@ udp_skip:
                             rp2p_consumer_session_close(&sessions[i]);
                         }
                     } else {
-                        rp2p_sendto_addr(local_fd, buf, (size_t)n,
+                        unsigned char plain[RP2P_BUF];
+                        size_t plain_len = rp2p_udp_decrypt(
+                            &sessions[i].udp_crypto,
+                            (const unsigned char *)buf, (size_t)n, plain,
+                            sizeof(plain));
+                        if (plain_len == 0) continue;
+                        rp2p_sendto_addr(local_fd, plain, plain_len,
                             &sessions[i].client_addr);
                     }
                     sessions[i].last_rx = rp2p_now_s();

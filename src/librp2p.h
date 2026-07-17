@@ -32,11 +32,11 @@ typedef struct rp2p rp2p_t;
 #define RP2P_ADDR_MAX       47
 #define RP2P_BUF          4096
 #define RP2P_PORT_DEFAULT  9876
-#define RP2P_BIND_PORT_DEFAULT 9876
 #define RP2P_HEARTBEAT_S     15
 #define RP2P_KEY_SZ          16
 #define RP2P_KEY_STR_SZ      33
 #define RP2P_PASS_MAX       255
+#define RP2P_SECRET_MAX     255
 
 #define RP2P_PROTO_TCP 1
 #define RP2P_PROTO_UDP 2
@@ -51,11 +51,8 @@ typedef struct rp2p_options {
     int seats;
     int pow;
     char pass[RP2P_PASS_MAX + 1];
+    char secret[RP2P_SECRET_MAX + 1];
     char *vip;
-    char index_host[256];
-    unsigned short index_port;
-    char bind_addr[256];
-    unsigned short bind_port;
     int sweep;
     char stun_url[256];
 } rp2p_options_t;
@@ -91,11 +88,7 @@ typedef struct {
     unsigned int priority;
 } rp2p_candidate_t;
 
-typedef void (*signal_callback_t)(rp2p_t *ctx);
 typedef void (*rp2p_signal_callback_t)(rp2p_t *ctx);
-
-typedef void (*rp2p_peer_cb)(const char *id, const char *addr,
-    unsigned short port, void *userdata);
 
 /**
  * Publisher listing callback.
@@ -107,11 +100,6 @@ typedef void (*rp2p_publisher_cb)(
 const char *id,
 void *userdata
 );
-
-typedef struct {
-    int sig;
-    rp2p_signal_callback_t cb;
-} rp2p_signal_entry_t;
 
 rp2p_options_t rp2p_options_default(void);
 void rp2p_options_load_env(rp2p_options_t *opts);
@@ -127,12 +115,38 @@ int rp2p_close(rp2p_t *ctx);
 int rp2p_stop(rp2p_t *ctx);
 
 /**
+ * Checks whether one context was requested to stop.
+ * Summary: Thread-safe and async-signal-safe query of the stop flag.
+ * @param ctx Context to query.
+ * @return Nonzero if a stop was requested, zero otherwise.
+ */
+int rp2p_stop_requested(rp2p_t *ctx);
+
+/**
  * Returns the build version generated at compile time.
  * @return Unix timestamp for the current build.
  */
 uint64_t rp2p_version(void);
 
 const char *rp2p_strerror(int code);
+
+/**
+ * Records one per-context detail error message.
+ * Summary: Caller-owned buffer; overwritten by the next call. Thread-safe
+ *          only when no concurrent operation touches the same context.
+ * @param ctx    Context to record the error on.
+ * @param fmt    Printf-style format string.
+ * @param ...    Format arguments.
+ * @return None.
+ */
+void rp2p_set_error(rp2p_t *ctx, const char *fmt, ...);
+
+/**
+ * Returns the last per-context detail error message.
+ * @param ctx Context to query.
+ * @return Pointer to a caller-owned message string, or empty string.
+ */
+const char *rp2p_get_error(rp2p_t *ctx);
 int rp2p_is_valid_id(const char *id);
 int rp2p_is_valid_pass_token(const char *pass);
 
@@ -231,6 +245,7 @@ int rp2p_set_pow(rp2p_t *ctx, int bits);
 int rp2p_set_port(rp2p_t *ctx, unsigned short port);
 int rp2p_set_protocol(rp2p_t *ctx, int proto);
 int rp2p_set_pass(rp2p_t *ctx, const char *pass);
+int rp2p_set_secret(rp2p_t *ctx, const char *secret);
 int rp2p_set_vip(
 rp2p_t *ctx,
 const char *vip,

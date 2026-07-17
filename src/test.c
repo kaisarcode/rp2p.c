@@ -513,11 +513,12 @@ static int case_rp2p_options_default(void) {
 
     rc = 0;
     opts = rp2p_options_default();
-    rc += expect_int("default index port", RP2P_PORT_DEFAULT, opts.index_port);
+    rc += expect_int("default seats", RP2P_MAX_PEERS, opts.seats);
     rc += expect_int("default pow", 0, opts.pow);
     rc += expect_int("default sweep", 20, opts.sweep);
     rc += expect_true("default vip is NULL", opts.vip == NULL);
     rc += expect_true("default pass is empty", opts.pass[0] == '\0');
+    rc += expect_true("default secret is empty", opts.secret[0] == '\0');
     return rc == 0 ? 0 : 1;
 }
 
@@ -531,35 +532,55 @@ static int case_rp2p_options_load_env(void) {
 
     rc = 0;
     opts = rp2p_options_default();
-    test_setenv("RP2P_INDEX", "index.local:1111");
-    test_setenv("RP2P_BIND", "127.0.0.1:2222");
     test_setenv("RP2P_SEATS", "7");
     test_setenv("RP2P_POW", "3");
     test_setenv("RP2P_PASS", "secret");
+    test_setenv("RP2P_SECRET", "tunnel-secret");
     test_setenv("RP2P_VIP", "vip vip-pass");
     test_setenv("RP2P_SWEEP", "9");
     test_setenv("RP2P_STUN", "stun:example.com:3478");
     rp2p_options_load_env(&opts);
-    rc += expect_string("env index host", "index.local", opts.index_host);
-    rc += expect_int("env index port", 1111, opts.index_port);
-    rc += expect_string("env bind address", "127.0.0.1", opts.bind_addr);
-    rc += expect_int("env bind port", 2222, opts.bind_port);
     rc += expect_int("env seats", 7, opts.seats);
     rc += expect_int("env pow", 3, opts.pow);
     rc += expect_string("env pass", "secret", opts.pass);
+    rc += expect_string("env secret", "tunnel-secret", opts.secret);
     rc += expect_string("env vip", "vip vip-pass", opts.vip);
     rc += expect_int("env sweep", 9, opts.sweep);
     rc += expect_string("env stun", "stun:example.com:3478", opts.stun_url);
     rp2p_options_load_env(NULL);
     rp2p_options_free(&opts);
-    test_setenv("RP2P_INDEX", NULL);
-    test_setenv("RP2P_BIND", NULL);
     test_setenv("RP2P_SEATS", NULL);
     test_setenv("RP2P_POW", NULL);
     test_setenv("RP2P_PASS", NULL);
+    test_setenv("RP2P_SECRET", NULL);
     test_setenv("RP2P_VIP", NULL);
     test_setenv("RP2P_SWEEP", NULL);
     test_setenv("RP2P_STUN", NULL);
+    return rc == 0 ? 0 : 1;
+}
+
+/**
+ * Tests rp2p_options_load_env strict rejection.
+ * Summary: Invalid numeric environment values are ignored and keep defaults.
+ * @return 0 on success, 1 on failure.
+ */
+static int case_rp2p_options_load_env_invalid(void) {
+    rp2p_options_t opts;
+    int rc;
+
+    rc = 0;
+    opts = rp2p_options_default();
+    test_setenv("RP2P_SEATS", "garbage");
+    test_setenv("RP2P_POW", "999");
+    test_setenv("RP2P_SWEEP", "-5");
+    rp2p_options_load_env(&opts);
+    rc += expect_int("invalid seats kept default", RP2P_MAX_PEERS, opts.seats);
+    rc += expect_int("invalid pow kept default", 0, opts.pow);
+    rc += expect_int("invalid sweep kept default", 20, opts.sweep);
+    rp2p_options_free(&opts);
+    test_setenv("RP2P_SEATS", NULL);
+    test_setenv("RP2P_POW", NULL);
+    test_setenv("RP2P_SWEEP", NULL);
     return rc == 0 ? 0 : 1;
 }
 
@@ -924,6 +945,26 @@ static int case_rp2p_signal_listener(void) {
 }
 
 /**
+ * Tests rp2p_set_error and rp2p_get_error.
+ * @return 0 on success, 1 on failure.
+ */
+static int case_rp2p_get_error(void) {
+    rp2p_t *ctx;
+    int rc;
+
+    rc = 0;
+    rc += expect_string("NULL ctx empty", "", rp2p_get_error(NULL));
+    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
+    rc += expect_string("cleared default", "", rp2p_get_error(ctx));
+    rp2p_set_error(ctx, "boom %d", 7);
+    rc += expect_string("captured detail", "boom 7", rp2p_get_error(ctx));
+    rp2p_set_error(ctx, NULL);
+    rc += expect_string("cleared via NULL", "", rp2p_get_error(ctx));
+    rp2p_close(ctx);
+    return rc == 0 ? 0 : 1;
+}
+
+/**
  * Tests rp2p_set_seats.
  * @return 0 on success, 1 on failure.
  */
@@ -1013,6 +1054,29 @@ static int case_rp2p_set_pass(void) {
 }
 
 /**
+ * Tests rp2p_set_secret.
+ * @return 0 on success, 1 on failure.
+ */
+static int case_rp2p_set_secret(void) {
+    rp2p_t *ctx;
+    int rc;
+
+    rc = 0;
+    rc += expect_int("set secret NULL ctx", RP2P_ERROR,
+        rp2p_set_secret(NULL, "x"));
+    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
+    rc += expect_int("set secret", RP2P_OK,
+        rp2p_set_secret(ctx, "secret"));
+    rc += expect_int("clear secret", RP2P_OK, rp2p_set_secret(ctx, ""));
+    rc += expect_int("set NULL secret", RP2P_ERROR,
+        rp2p_set_secret(ctx, NULL));
+    rc += expect_int("set unsafe secret", RP2P_ERROR,
+        rp2p_set_secret(ctx, "bad`secret"));
+    rp2p_close(ctx);
+    return rc == 0 ? 0 : 1;
+}
+
+/**
  * Tests rp2p_set_vip.
  * @return 0 on success, 1 on failure.
  */
@@ -1087,6 +1151,7 @@ static int case_rp2p_set_stun_url(void) {
 static int run_case(const char *name) {
     if (strcmp(name, "rp2p_options_default") == 0) return case_rp2p_options_default();
     if (strcmp(name, "rp2p_options_load_env") == 0) return case_rp2p_options_load_env();
+    if (strcmp(name, "rp2p_options_load_env_invalid") == 0) return case_rp2p_options_load_env_invalid();
     if (strcmp(name, "rp2p_options_free") == 0) return case_rp2p_options_free();
     if (strcmp(name, "rp2p_open") == 0) return case_rp2p_open();
     if (strcmp(name, "rp2p_close") == 0) return case_rp2p_close();
@@ -1105,11 +1170,13 @@ static int run_case(const char *name) {
     if (strcmp(name, "rp2p_listen_signals") == 0) return case_rp2p_listen_signals();
     if (strcmp(name, "rp2p_listen_signal") == 0) return case_rp2p_listen_signal();
     if (strcmp(name, "rp2p_signal_listener") == 0) return case_rp2p_signal_listener();
+    if (strcmp(name, "rp2p_get_error") == 0) return case_rp2p_get_error();
     if (strcmp(name, "rp2p_set_seats") == 0) return case_rp2p_set_seats();
     if (strcmp(name, "rp2p_set_pow") == 0) return case_rp2p_set_pow();
     if (strcmp(name, "rp2p_set_port") == 0) return case_rp2p_set_port();
     if (strcmp(name, "rp2p_set_protocol") == 0) return case_rp2p_set_protocol();
     if (strcmp(name, "rp2p_set_pass") == 0) return case_rp2p_set_pass();
+    if (strcmp(name, "rp2p_set_secret") == 0) return case_rp2p_set_secret();
     if (strcmp(name, "rp2p_set_vip") == 0) return case_rp2p_set_vip();
     if (strcmp(name, "rp2p_set_sweep") == 0) return case_rp2p_set_sweep();
     if (strcmp(name, "rp2p_set_stun_url") == 0) return case_rp2p_set_stun_url();

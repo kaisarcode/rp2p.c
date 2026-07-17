@@ -39,6 +39,36 @@ static void rp2p_signal_cb(rp2p_t *ctx) {
 }
 
 /**
+ * Parses one bounded ASCII decimal integer.
+ * @param text Input decimal text.
+ * @param min  Inclusive lower bound.
+ * @param max  Inclusive upper bound.
+ * @param out  Output parsed value.
+ * @return 0 on success, 1 on invalid input.
+ */
+static int parse_decimal(const char *text, long min, long max, long *out) {
+    unsigned long value;
+    unsigned long limit;
+    size_t i;
+
+    if (!text || !text[0] || !out || min < 0 || max < min) return 1;
+    value = 0;
+    limit = (unsigned long)max;
+    for (i = 0; text[i] != '\0'; i++) {
+        unsigned long digit;
+
+        if (text[i] < '0' || text[i] > '9') return 1;
+        digit = (unsigned long)(text[i] - '0');
+        if (digit > limit) return 1;
+        if (value > (limit - digit) / 10) return 1;
+        value = value * 10 + digit;
+    }
+    if (value < (unsigned long)min) return 1;
+    *out = (long)value;
+    return 0;
+}
+
+/**
  * Parses host and optional port from a string.
  * Summary: Supports host, host:port, IPv4:port, [IPv6], and [IPv6]:port.
  * @param text     Input address string.
@@ -52,8 +82,7 @@ static int parse_addr(const char *text, char *host, size_t host_sz,
 {
     const char *colon;
     const char *end_bracket;
-    char *end;
-    unsigned long val;
+    long val;
     size_t n;
 
     if (!text || !text[0] || !host || host_sz == 0 || !port) return 1;
@@ -67,8 +96,7 @@ static int parse_addr(const char *text, char *host, size_t host_sz,
         host[n] = '\0';
         if (end_bracket[1] == '\0') return 0;
         if (end_bracket[1] != ':' || end_bracket[2] == '\0') return 1;
-        val = strtoul(end_bracket + 2, &end, 10);
-        if (*end != '\0' || val == 0 || val > 65535) return 1;
+        if (parse_decimal(end_bracket + 2, 1, 65535, &val) != 0) return 1;
         *port = (unsigned short)val;
         return 0;
     }
@@ -90,8 +118,7 @@ static int parse_addr(const char *text, char *host, size_t host_sz,
     if (n == 0 || n >= host_sz) return 1;
     memcpy(host, text, n);
     host[n] = '\0';
-    val = strtoul(colon + 1, &end, 10);
-    if (*end != '\0' || val == 0 || val > 65535) return 1;
+    if (parse_decimal(colon + 1, 1, 65535, &val) != 0) return 1;
     *port = (unsigned short)val;
     return 0;
 }
@@ -135,13 +162,8 @@ static int parse_hostspec(const char *spec, char *hostname, size_t hn_sz,
  */
 static int parse_port(const char *text, unsigned short *out) {
     long val;
-    char *end;
 
-    if (!text || !text[0] || !out) return 1;
-    errno = 0;
-    val = strtol(text, &end, 10);
-    if (errno != 0 || *end != '\0') return 1;
-    if (val < 1 || val > 65535) return 1;
+    if (!out || parse_decimal(text, 1, 65535, &val) != 0) return 1;
     *out = (unsigned short)val;
     return 0;
 }
@@ -156,15 +178,36 @@ static int parse_port(const char *text, unsigned short *out) {
  * @return 0 on success, 1 on failure.
  */
 static int parse_int(const char *text, long min, long max, long *out) {
-    long val;
-    char *end;
+    return parse_decimal(text, min, max, out);
+}
 
-    if (!text || !text[0] || !out) return 1;
-    errno = 0;
-    val = strtol(text, &end, 10);
-    if (errno != 0 || *end != '\0') return 1;
-    if (val < min || val > max) return 1;
-    *out = val;
+/**
+ * Loads only index-owned environment configuration.
+ * @param opts Index options to populate.
+ * @return 0 on success, 1 on allocation failure.
+ */
+static int load_index_options(rp2p_options_t *opts) {
+    const char *value;
+    long number;
+    size_t len;
+
+    value = getenv("RP2P_SEATS");
+    if (parse_decimal(value, 0, RP2P_MAX_PEERS, &number) == 0)
+        opts->seats = (int)number;
+    value = getenv("RP2P_POW");
+    if (parse_decimal(value, 0, 32, &number) == 0)
+        opts->pow = (int)number;
+    value = getenv("RP2P_PASS");
+    if (value) {
+        strncpy(opts->pass, value, RP2P_PASS_MAX);
+        opts->pass[RP2P_PASS_MAX] = '\0';
+    }
+    value = getenv("RP2P_VIP");
+    if (!value) return 0;
+    len = strlen(value);
+    opts->vip = (char *)malloc(len + 1);
+    if (!opts->vip) return 1;
+    memcpy(opts->vip, value, len + 1);
     return 0;
 }
 
@@ -225,7 +268,10 @@ int main(int argc, char **argv) {
         int exit_code;
 
         opts = rp2p_options_default();
-        rp2p_options_load_env(&opts);
+        if (load_index_options(&opts) != 0) {
+            fprintf(stderr, "rp2p: failed to load index options\n");
+            return 1;
+        }
         max_peers = opts.seats;
         max_peers_set = getenv("RP2P_SEATS") != NULL;
         pow_bits = opts.pow;
@@ -271,12 +317,6 @@ int main(int argc, char **argv) {
         }
         if (rp2p_set_pass(ctx, opts.pass) != RP2P_OK) {
             fprintf(stderr, "rp2p: invalid RP2P_PASS characters\n");
-            rp2p_close(ctx);
-            rp2p_options_free(&opts);
-            return 1;
-        }
-        if (rp2p_set_secret(ctx, opts.secret) != RP2P_OK) {
-            fprintf(stderr, "rp2p: invalid RP2P_SECRET characters\n");
             rp2p_close(ctx);
             rp2p_options_free(&opts);
             return 1;

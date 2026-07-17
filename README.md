@@ -1,8 +1,6 @@
 # rp2p.c - RedP2P: Peer-to-peer service tunneling
 
-`rp2p.c` is a small and portable C library and CLI for creating direct encrypted tunnels between peers. A minimal TCP index handles temporary registration, lookup, candidate exchange, and hole-punch coordination, while application data travels directly over UDP. TCP and UDP services are adapted at the edges, keeping the core focused, inspectable, and independent of relays, global identities, or centralized data paths.
-
----
+`rp2p.c` is a small and portable C library and CLI for creating direct peer-to-peer service tunnels. TCP mode uses an encrypted reliable stream, while UDP mode supports optional authenticated encryption through `RP2P_SECRET`. A minimal TCP index handles temporary registration, lookup, candidate exchange, and hole-punch coordination, while application data travels directly between peers over UDP.
 
 ## CLI
 
@@ -138,8 +136,6 @@ rp2p con web@idx.example.com:9876 --tcp 9000
 printf 'ping' | socat - TCP:127.0.0.1:9000
 ```
 
----
-
 ### Parameters
 
 | Command | Description |
@@ -154,8 +150,6 @@ printf 'ping' | socat - TCP:127.0.0.1:9000
 | `con <host>@<index[:port]> --udp <port> [--sweep <n>] [--stun <url>]` | Expose one remote UDP service on `127.0.0.1:<port>`. |
 | `-h`, `--help` | Show help and usage. |
 | `-v`, `--version` | Show build version. |
-
----
 
 ### Syntax notes
 
@@ -174,11 +168,13 @@ IDs may contain only ASCII letters and digits (`A-Z`, `a-z`, `0-9`). Password an
 The index is a **TCP-only control plane**.
 It handles registration, lookup, candidate exchange, and punch signaling.
 It does **not** bind UDP, perform NAT discovery, relay UDP, or carry application payload.
+The index control channel is plaintext, does not authorize consumers, and never needs `RP2P_SECRET`.
 
 The inter-peer data channel is **UDP-based**.
 By default it tries direct UDP hole punching first.
 In `--tcp` mode, RP2P wraps that UDP path in an internal encrypted reliable stream so local TCP applications still see ordered, reconstructable, full-duplex byte semantics.
-Each TCP client session performs a fresh ephemeral key exchange with the remote peer before application data flows, and those session keys are discarded when the session ends. When `RP2P_SECRET` is nonempty on both peers, authenticated HELLO frames and secret-bound key derivation prevent an unauthenticated peer from completing the handshake.
+Each TCP client session performs a fresh ephemeral key exchange with the remote peer before application data flows, and those session keys are discarded when the session ends. Without `RP2P_SECRET`, TCP is encrypted but unauthenticated. With the same nonempty `RP2P_SECRET` on both peers, TCP is authenticated and encrypted, and confirmation binds the session to the initiator ID, target publisher ID, transport, roles, session ID, keys, and nonces.
+UDP without `RP2P_SECRET` is plaintext. UDP with the same secret on both peers is authenticated and encrypted. Peers explicitly negotiate this mode before forwarding data, so secure and plaintext peers do not silently interoperate.
 The `--tcp` and `--udp` flags control how data enters and leaves the tunnel on each end:
 
 | Flag | Publisher side | Consumer side |
@@ -217,11 +213,27 @@ rp2p_open(&ctx);
 
 rp2p_set_pow(ctx, 0);
 rp2p_set_pass(ctx, "password");
-rp2p_set_secret(ctx, "tunnel-secret");
 
 rp2p_serve_index(ctx, "0.0.0.0", 9876);
 
 rp2p_close(ctx);
+```
+
+Configure the same tunnel secret independently on publisher and consumer contexts:
+
+```c
+rp2p_t *publisher;
+rp2p_t *consumer;
+
+rp2p_open(&publisher);
+rp2p_set_secret(publisher, "tunnel-secret");
+rp2p_set_protocol(publisher, RP2P_PROTO_TCP);
+rp2p_set_port(publisher, 8080);
+
+rp2p_open(&consumer);
+rp2p_set_secret(consumer, "tunnel-secret");
+rp2p_set_protocol(consumer, RP2P_PROTO_TCP);
+rp2p_set_port(consumer, 9000);
 ```
 
 List publishers currently registered in an index. Publishers are services registered by `rp2p set`; consumers are clients that use `rp2p con` to look up and connect to those services.
@@ -242,8 +254,6 @@ rp2p_list_publishers(ctx, "idx.example.com", 9876, on_publisher, NULL);
 rp2p_close(ctx);
 ```
 
----
-
 ## Lifecycle
 
 - `rp2p_open()` - allocates and returns a new context owned by the caller.
@@ -263,11 +273,9 @@ rp2p_close(ctx);
 - `rp2p_set_stun_url()` - enables optional STUN discovery for `srflx` candidates.
 - `rp2p_close()` - releases the context.
 
----
-
 ## Wire Protocol
 
-Index control messages are plain text over TCP. The inter-peer data channel is UDP-based regardless of the `--tcp`/`--udp` flag.
+Index control messages are plaintext over TCP. The index does not authenticate or authorize consumers. The inter-peer data channel is UDP-based regardless of the `--tcp`/`--udp` flag.
 UDP is used only between peers for hole-punch probes, keepalives, and direct payload transport. In `--tcp` mode, application bytes are carried inside RP2P's own encrypted reliable stream frames over that UDP path.
 
 | Request | Response |
@@ -295,6 +303,9 @@ In `--tcp` mode only, peers run an internal session protocol over the selected U
 - DATA frames are encrypted and authenticated.
 - Ordering, retransmission, duplicate suppression, and stream reconstruction happen inside RP2P.
 - `--udp` mode preserves datagram boundaries. With `RP2P_SECRET`, each datagram uses AEAD with directional sequence nonces and a 64-packet replay window. With an empty secret, datagrams remain plaintext.
+- UDP application payloads are limited to `1412` bytes for an IPv6-safe MTU of 1500. Oversized datagrams are rejected without truncation or RP2P fragmentation.
+- Zero-length UDP application datagrams are preserved in plaintext and secure modes.
+- Secure UDP keepalives are authenticated protocol packets. TCP keepalives use authenticated stream `PING` and `PONG` frames.
 
 Internal TCP stream frame types:
 
@@ -310,8 +321,6 @@ Internal TCP stream frame types:
 - `PONG`
 
 The deregistration key is generated by the index automatically and stored locally by the announcing host. The user never sets it manually.
-
----
 
 ## Proof-of-Work
 
@@ -347,7 +356,7 @@ RP2P_PASS='global' RP2P_VIP='web webpass admin adminpass' rp2p idx 9876
 | :--- | :--- |
 | `RP2P_POW=0` | PoW bits for index registration (overridden by `--pow` flag). |
 | `RP2P_PASS=password` | Optional shared password used to protect server registration. |
-| `RP2P_SECRET=secret` | Optional independent secret for peer authentication, UDP AEAD, and replay protection. Both peers must use the same value. |
+| `RP2P_SECRET=secret` | Optional independent publisher/consumer tunnel secret for TCP authentication and UDP AEAD. The index never reads or needs it. |
 | `RP2P_VIP='id pass id pass ...'` | Reserved seat passwords parsed as whitespace-separated `<id> <pass>` pairs. |
 | `RP2P_SWEEP=32` | UDP port sweep range used during punch fallback. |
 | `RP2P_STUN=stun:host:port` | Optional STUN server used to discover `srflx` automatically. |
@@ -392,9 +401,7 @@ rp2p_set_pass(ctx, "password");
 | 28 | 268M | ~50s | ~8min | ~1h |
 | 32 | 4G | ~15min | ~2h | ~24h |
 
-`RP2P_PASS` only controls who may register services in the index. `RP2P_SECRET` independently authenticates direct TCP tunnel handshakes and encrypts raw UDP payloads. Neither replaces application-level authorization where the exposed service requires user identities or access policy.
-
----
+`RP2P_PASS` only controls who may register services in the index. It does not authorize consumers. `RP2P_SECRET` is shared only by publisher and consumer peers; the index never needs it. Neither replaces application-level authorization where the exposed service requires user identities or access policy.
 
 ## Notes
 
@@ -408,11 +415,10 @@ rp2p_set_pass(ctx, "password");
 - Each accepted local TCP client creates a separate peer session.
 - The publisher can serve multiple consumers concurrently.
 - `--udp` mode preserves datagram boundaries and adds authenticated encryption plus replay rejection when `RP2P_SECRET` is set. It does not add ordering or retransmission.
+- UDP payloads larger than 1412 bytes are rejected, and zero-length datagrams are supported.
 - `--stun` is opt-in and used only for endpoint discovery. It does not carry application payloads.
 - RP2P does not implement TURN or relay application traffic through the index or other third-party servers.
 - On restrictive NATs where direct UDP connectivity cannot be established, some sessions may fail by design rather than fall back to relayed transport.
-
----
 
 ## Build
 
@@ -471,8 +477,6 @@ make s390x/linux
 make loongarch64/linux
 ```
 
----
-
 ## Project scope
 
 librp2p.c is built around a small and specific goal: coordinate peers, establish a direct connection between them, and keep third-party infrastructure outside the application data path.
@@ -482,8 +486,6 @@ Its surface is intentionally limited. There is no large collection of modules to
 A well-known project in the broader peer-to-peer networking space is [libp2p](https://libp2p.io/). It is an established modular stack designed to support many kinds of peer-to-peer systems through a broad collection of transports, secure channels, stream multiplexers, discovery and routing mechanisms, NAT traversal protocols, relays, and other components.
 
 librp2p.c does not attempt to replace libp2p or reproduce its scope. Applications that need a general, extensible, and interoperable peer-to-peer networking platform may be better served by libp2p. librp2p.c is intended for applications that need direct peer connectivity through a smaller component with fewer concepts, fewer decisions, and a shorter learning curve.
-
----
 
 ## Development Requirements
 
@@ -520,15 +522,11 @@ Required only for multiarch builds:
 
 - `ctest` (included with cmake)
 
----
-
 ## Beta Notice
 
 This is a beta project tested only on Debian x86_64. It was created out of a personal need for these libraries, but no guarantees are provided regarding its stability or future support. You are free to test it, use it, and modify it as you please.
 
 If you'd like to reach out, you can send an email to kaisar@kaisarcode.com. Please note that I do not accept pull requests; the goal is to avoid long-term dependency on platforms like GitHub, and I do not maintain fixed infrastructure to guarantee long-term stability for these projects.
-
----
 
 ## License
 

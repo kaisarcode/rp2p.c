@@ -26,6 +26,12 @@ typedef struct rp2p rp2p_t;
 #define RP2P_ENOENT     -3
 #define RP2P_ETIMEOUT   -4
 #define RP2P_EFULL      -5
+#define RP2P_EINVAL     -6
+#define RP2P_EPROTO     -7
+#define RP2P_EAUTH      -8
+#define RP2P_EVERSION   -9
+#define RP2P_EPUNCH    -10
+#define RP2P_ECRYPTO   -11
 
 #define RP2P_MAX_PEERS     1024
 #define RP2P_ID_MAX         63
@@ -37,6 +43,7 @@ typedef struct rp2p rp2p_t;
 #define RP2P_KEY_STR_SZ      33
 #define RP2P_PASS_MAX       255
 #define RP2P_SECRET_MAX     255
+#define RP2P_UDP_PAYLOAD_MAX 1412
 
 #define RP2P_PROTO_TCP 1
 #define RP2P_PROTO_UDP 2
@@ -101,16 +108,44 @@ const char *id,
 void *userdata
 );
 
+/**
+ * Returns initialized caller-owned runtime options.
+ * @return Options value with documented defaults.
+ */
 rp2p_options_t rp2p_options_default(void);
+
+/**
+ * Loads publisher or consumer RP2P environment settings into options.
+ * @param opts Caller-owned options initialized by rp2p_options_default.
+ * @return None.
+ */
 void rp2p_options_load_env(rp2p_options_t *opts);
+
+/**
+ * Releases allocations owned by one options value.
+ * @param opts Caller-owned options value.
+ * @return None.
+ */
 void rp2p_options_free(rp2p_options_t *opts);
+
+/**
+ * Allocates one independent RP2P context.
+ * @param out Receives the caller-owned context.
+ * @return RP2P_OK on success or RP2P_ERROR on allocation failure.
+ */
 int rp2p_open(rp2p_t **out);
+
+/**
+ * Closes descriptors, wipes session state, and releases one context.
+ * @param ctx Context returned by rp2p_open.
+ * @return RP2P_OK on success or RP2P_ERROR for NULL.
+ */
 int rp2p_close(rp2p_t *ctx);
 
 /**
  * Request clean termination for the current blocking operation on one context.
  * @param ctx Context to stop.
- * @return RP2P_OK on success or RP2P_ERROR on failure.
+ * @return RP2P_OK on success or RP2P_EINVAL for NULL.
  */
 int rp2p_stop(rp2p_t *ctx);
 
@@ -128,26 +163,32 @@ int rp2p_stop_requested(rp2p_t *ctx);
  */
 uint64_t rp2p_version(void);
 
-const char *rp2p_strerror(int code);
-
 /**
- * Records one per-context detail error message.
- * Summary: Caller-owned buffer; overwritten by the next call. Thread-safe
- *          only when no concurrent operation touches the same context.
- * @param ctx    Context to record the error on.
- * @param fmt    Printf-style format string.
- * @param ...    Format arguments.
- * @return None.
+ * Returns a stable static description for one RP2P status category.
+ * @param code RP2P status code.
+ * @return Static string requiring no release.
  */
-void rp2p_set_error(rp2p_t *ctx, const char *fmt, ...);
+const char *rp2p_strerror(int code);
 
 /**
  * Returns the last per-context detail error message.
  * @param ctx Context to query.
- * @return Pointer to a caller-owned message string, or empty string.
+ * @return Context-owned string valid until the next update or context close.
  */
 const char *rp2p_get_error(rp2p_t *ctx);
+
+/**
+ * Validates one ASCII service identifier.
+ * @param id Identifier to validate.
+ * @return 1 when valid, 0 otherwise.
+ */
 int rp2p_is_valid_id(const char *id);
+
+/**
+ * Validates one terminal-safe password or secret token.
+ * @param pass Token to validate.
+ * @return 1 when valid, 0 otherwise.
+ */
 int rp2p_is_valid_pass_token(const char *pass);
 
 /**
@@ -220,46 +261,109 @@ rp2p_publisher_cb cb,
 void *userdata
 );
 
+/**
+ * Adds or removes one context-local signal callback.
+ * @return RP2P_OK on success or a negative error category.
+ */
 int rp2p_on_signal(
 rp2p_t *ctx,
 int sig,
 rp2p_signal_callback_t cb
 );
 
+/**
+ * Dispatches one signal to matching context-local callbacks.
+ * @return Number of callbacks invoked.
+ */
 int rp2p_raise_signal(
 rp2p_t *ctx,
 int sig
 );
 
+/**
+ * Registers one context for deferred process-signal dispatch.
+ * @return RP2P_OK on success or a negative error category.
+ */
 int rp2p_listen_signals(rp2p_t *ctx);
 
+/**
+ * Installs the async-signal-safe handler for one signal number.
+ * @return RP2P_OK on success or a negative error category.
+ */
 int rp2p_listen_signal(
 rp2p_t *ctx,
 int sig
 );
 
+/**
+ * Provides the legacy signal-listener thread entry point.
+ * @return NULL.
+ */
 void *rp2p_signal_listener(void *arg);
 
+/**
+ * Sets the index publisher capacity.
+ * @return RP2P_OK or RP2P_EINVAL.
+ */
 int rp2p_set_seats(rp2p_t *ctx, int seats);
+
+/**
+ * Sets registration proof difficulty.
+ * @return RP2P_OK or RP2P_EINVAL.
+ */
 int rp2p_set_pow(rp2p_t *ctx, int bits);
+
+/**
+ * Sets the local nonzero service port.
+ * @return RP2P_OK or RP2P_EINVAL.
+ */
 int rp2p_set_port(rp2p_t *ctx, unsigned short port);
+
+/**
+ * Selects TCP or UDP edge transport.
+ * @return RP2P_OK or RP2P_EINVAL.
+ */
 int rp2p_set_protocol(rp2p_t *ctx, int proto);
+
+/**
+ * Sets publisher registration protection.
+ * @return RP2P_OK or RP2P_EINVAL.
+ */
 int rp2p_set_pass(rp2p_t *ctx, const char *pass);
+
+/**
+ * Sets the publisher or consumer tunnel secret, never an index secret.
+ * @return RP2P_OK or RP2P_EINVAL.
+ */
 int rp2p_set_secret(rp2p_t *ctx, const char *secret);
+
+/**
+ * Sets reserved publisher IDs and registration passwords.
+ * @return RP2P_OK or a negative error category.
+ */
 int rp2p_set_vip(
 rp2p_t *ctx,
 const char *vip,
 char *err,
 size_t err_cap
 );
+
+/**
+ * Sets the bounded direct-punch port sweep range.
+ * @return RP2P_OK or RP2P_EINVAL.
+ */
 int rp2p_set_sweep(
 rp2p_t *ctx,
 int sweep
 );
 
+/**
+ * Sets or disables the optional STUN discovery URL.
+ * @return RP2P_OK or a negative error category.
+ */
 int rp2p_set_stun_url(
-    rp2p_t *ctx,
-    const char *url
+rp2p_t *ctx,
+const char *url
 );
 
 #ifdef __cplusplus

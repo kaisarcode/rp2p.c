@@ -119,6 +119,13 @@ if(RP2P_BUILD_TESTS)
     add_test(NAME library-rp2p_serve_index COMMAND rp2p_contract_test rp2p_serve_index)
     add_test(NAME library-rp2p_wait COMMAND rp2p_contract_test rp2p_wait)
     add_test(NAME library-rp2p_connect COMMAND rp2p_contract_test rp2p_connect)
+    add_test(NAME library-rp2p_udp_plain COMMAND rp2p_contract_test rp2p_udp_plain)
+    add_test(NAME library-rp2p_udp_secure COMMAND rp2p_contract_test rp2p_udp_secure)
+    add_test(NAME library-rp2p_udp_secure_publisher COMMAND rp2p_contract_test rp2p_udp_secure_publisher)
+    add_test(NAME library-rp2p_udp_secure_consumer COMMAND rp2p_contract_test rp2p_udp_secure_consumer)
+    add_test(NAME library-rp2p_udp_secret_mismatch COMMAND rp2p_contract_test rp2p_udp_secret_mismatch)
+    add_test(NAME library-rp2p_tcp_secure COMMAND rp2p_contract_test rp2p_tcp_secure)
+    add_test(NAME library-rp2p_tcp_secret_mismatch COMMAND rp2p_contract_test rp2p_tcp_secret_mismatch)
     add_test(NAME library-rp2p_deregister COMMAND rp2p_contract_test rp2p_deregister)
     add_test(NAME library-rp2p_list_publishers COMMAND rp2p_contract_test rp2p_list_publishers)
     add_test(NAME library-rp2p_on_signal COMMAND rp2p_contract_test rp2p_on_signal)
@@ -139,6 +146,16 @@ if(RP2P_BUILD_TESTS)
     set_tests_properties(library-rp2p_serve_index PROPERTIES TIMEOUT 30)
     set_tests_properties(library-rp2p_wait PROPERTIES TIMEOUT 30)
     set_tests_properties(library-rp2p_connect PROPERTIES TIMEOUT 30)
+    set_tests_properties(
+        library-rp2p_udp_plain
+        library-rp2p_udp_secure
+        library-rp2p_udp_secure_publisher
+        library-rp2p_udp_secure_consumer
+        library-rp2p_udp_secret_mismatch
+        library-rp2p_tcp_secure
+        library-rp2p_tcp_secret_mismatch
+        PROPERTIES TIMEOUT 45
+    )
     set_tests_properties(library-rp2p_deregister PROPERTIES TIMEOUT 30)
     set_tests_properties(library-rp2p_list_publishers PROPERTIES TIMEOUT 30)
 endif()

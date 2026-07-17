@@ -422,8 +422,8 @@ test:
 				-DCMAKE_CROSSCOMPILING_EMULATOR=$(WINE) \
 				-G Ninja -Wno-dev > /dev/null; \
 		fi; \
-		cmake --build $(BUILD_DIR)/test-wine; \
-		ctest --test-dir $(BUILD_DIR)/test-wine --output-on-failure; \
+		cmake --build $(BUILD_DIR)/test-wine && \
+		ctest --test-dir $(BUILD_DIR)/test-wine --output-on-failure --parallel 8; \
 	else \
 		if [ "$(NATIVE_ARCH)" = "unsupported" ] || [ "$(NATIVE_PLATFORM)" = "unsupported" ]; then \
 			echo "Unsupported native test target $(HOST_ARCH)/$(HOST_SYSTEM)" >&2; \
@@ -443,8 +443,8 @@ test:
 				$(NATIVE_IMPORT_LIBRARY) \
 				-G Ninja -Wno-dev > /dev/null; \
 		fi; \
-		cmake --build $(BUILD_DIR)/test; \
-		ctest --test-dir $(BUILD_DIR)/test --output-on-failure; \
+		cmake --build $(BUILD_DIR)/test && \
+		ctest --test-dir $(BUILD_DIR)/test --output-on-failure --parallel 8; \
 	fi
 
 wine:

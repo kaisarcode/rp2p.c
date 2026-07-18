@@ -132,14 +132,7 @@ static int rp2p_parse_env(const char *text, long min, long max, long *out) {
 #define RP2P_STREAM_MAGIC      0x48535452u
 #define RP2P_STREAM_VERSION    1u
 #define RP2P_STREAM_SESSION_ID_SZ 16
-#define RP2P_STREAM_HELLO_NONCE_SZ 16
 #define RP2P_STREAM_HELLO_BASE_SZ 202
-#define RP2P_STREAM_HELLO_TAG_SZ 16
-#define RP2P_STREAM_CONFIRM_SZ 56
-#define RP2P_STREAM_TRANSCRIPT_MAX 320
-#define RP2P_STREAM_KEY_SZ     32
-#define RP2P_STREAM_TAG_SZ     16
-#define RP2P_STREAM_NONCE_SZ   24
 #define RP2P_STREAM_MAX_PAYLOAD 1024
 #define RP2P_STREAM_MAX_FRAME  1400
 #define RP2P_STREAM_SEND_WINDOW 64
@@ -225,24 +218,11 @@ static int rp2p_parse_env(const char *text, long min, long max, long *out) {
 #define RP2P_STREAM_TYPE_RESET     8u
 #define RP2P_STREAM_TYPE_PING      9u
 #define RP2P_STREAM_TYPE_PONG      10u
-#define RP2P_STREAM_TYPE_CONFIRM   11u
-#define RP2P_STREAM_TYPE_CONFIRM_ACK 12u
 
 #define RP2P_STREAM_DIR_C2S    1u
 #define RP2P_STREAM_DIR_S2C    2u
 #define RP2P_STREAM_ROLE_INITIATOR 1u
 #define RP2P_STREAM_ROLE_RESPONDER 2u
-#define RP2P_UDP_MAGIC         0x50445552u
-#define RP2P_UDP_VERSION       1u
-#define RP2P_UDP_HEADER_SZ     24
-#define RP2P_UDP_TAG_SZ        16
-#define RP2P_UDP_NEGOTIATE_MAGIC 0x4e445052u
-#define RP2P_UDP_NEGOTIATE_SZ 48
-#define RP2P_UDP_MODE_PLAIN 0u
-#define RP2P_UDP_MODE_SECURE 1u
-#define RP2P_UDP_TYPE_DATA 1u
-#define RP2P_UDP_TYPE_KEEPALIVE 2u
-
 typedef struct {
     uint8_t type;
     uint8_t direction;
@@ -269,8 +249,8 @@ typedef struct {
 #define RP2P_BUILD_VERSION 0
 #endif
 
-_Static_assert(RP2P_STREAM_HEADER_SZ + RP2P_STREAM_TAG_SZ + RP2P_STREAM_MAX_PAYLOAD <= RP2P_STREAM_MAX_FRAME,
-    "Stream frame cannot fit header, tag, and max payload");
+_Static_assert(RP2P_STREAM_HEADER_SZ + RP2P_STREAM_MAX_PAYLOAD <= RP2P_STREAM_MAX_FRAME,
+    "Stream frame cannot fit header and max payload");
 _Static_assert(RP2P_STREAM_MAX_FRAME <= RP2P_MAX_DATAGRAM_V4,
     "Stream frame exceeds IPv4 datagram limit");
 _Static_assert(RP2P_STREAM_MAX_FRAME <= RP2P_MAX_DATAGRAM_V6,
@@ -299,19 +279,6 @@ typedef struct {
 } rp2p_stream_pending_frame_t;
 
 typedef struct {
-    int ready;
-    int authenticated;
-    unsigned char local_secret[32];
-    unsigned char local_public[32];
-    unsigned char peer_public[32];
-    unsigned char local_nonce[RP2P_STREAM_HELLO_NONCE_SZ];
-    unsigned char peer_nonce[RP2P_STREAM_HELLO_NONCE_SZ];
-    unsigned char tx_key[RP2P_STREAM_KEY_SZ];
-    unsigned char rx_key[RP2P_STREAM_KEY_SZ];
-    unsigned char psk[RP2P_STREAM_KEY_SZ];
-} rp2p_stream_crypto_t;
-
-typedef struct {
     uint32_t next_seq;
     uint32_t highest_sent;
     int fin_sent;
@@ -333,8 +300,6 @@ typedef struct {
     int ready;
     int hello_sent;
     int hello_acked;
-    int confirm_sent;
-    int confirm_received;
     int reset_sent;
     int reset_received;
     int close_notified;
@@ -346,7 +311,6 @@ typedef struct {
     char initiator_id[RP2P_ID_MAX + 1];
     char target_id[RP2P_ID_MAX + 1];
     uint8_t transport_protocol;
-    rp2p_stream_crypto_t crypto;
     rp2p_stream_outbound_t out;
     rp2p_stream_inbound_t in;
     uint64_t last_rx_ms;
@@ -359,19 +323,6 @@ typedef struct {
     uint64_t rto_ms;
     rp2p_stream_pending_frame_t fault_pending;
 } rp2p_stream_state_t;
-
-typedef struct {
-    int enabled;
-    int negotiated;
-    uint8_t tx_direction;
-    uint8_t rx_direction;
-    unsigned char tx_key[32];
-    unsigned char rx_key[32];
-    unsigned char session_id[8];
-    uint64_t tx_seq;
-    uint64_t rx_max;
-    uint64_t rx_window;
-} rp2p_udp_crypto_t;
 
 typedef struct {
     int used;
@@ -780,7 +731,6 @@ struct rp2p {
     int vips_cap;
     char key[RP2P_KEY_STR_SZ];
     char pass[RP2P_PASS_MAX + 1];
-    char secret[RP2P_SECRET_MAX + 1];
     int pow_bits;
     unsigned short bind_port;
     int explicit_port;
@@ -823,7 +773,6 @@ typedef struct rp2p_udp_consumer_session {
     int active;
     int is_tcp;
     rp2p_stream_state_t stream;
-    rp2p_udp_crypto_t udp_crypto;
 } rp2p_udp_consumer_session_t;
 
 typedef struct rp2p_udp_server_session {
@@ -835,7 +784,6 @@ typedef struct rp2p_udp_server_session {
     int active;
     int is_tcp;
     rp2p_stream_state_t stream;
-    rp2p_udp_crypto_t udp_crypto;
 } rp2p_udp_server_session_t;
 
 #ifdef _WIN32
@@ -1062,19 +1010,6 @@ static uint32_t rp2p_load_u32_le(const unsigned char *p) {
 }
 
 /**
- * Loads one little-endian u64.
- * @return Decoded value.
- */
-static uint64_t rp2p_load_u64_le(const unsigned char *p) {
-    uint64_t value;
-    int i;
-
-    value = 0;
-    for (i = 7; i >= 0; i--) value = (value << 8) | p[i];
-    return value;
-}
-
-/**
  * Stores one little-endian u16.
  * @return None.
  */
@@ -1092,19 +1027,6 @@ static void rp2p_store_u32_le(unsigned char *p, uint32_t v) {
     p[1] = (unsigned char)((v >> 8) & 0xffu);
     p[2] = (unsigned char)((v >> 16) & 0xffu);
     p[3] = (unsigned char)((v >> 24) & 0xffu);
-}
-
-/**
- * Stores one little-endian u64.
- * @return None.
- */
-static void rp2p_store_u64_le(unsigned char *p, uint64_t value) {
-    int i;
-
-    for (i = 0; i < 8; i++) {
-        p[i] = (unsigned char)(value & 0xffu);
-        value >>= 8;
-    }
 }
 
 /**
@@ -1249,20 +1171,6 @@ static int rp2p_stream_make_session_id(unsigned char out[RP2P_STREAM_SESSION_ID_
 }
 
 /**
- * Builds one AEAD nonce from session direction and sequence.
- * @return None.
- */
-static void rp2p_stream_nonce(unsigned char nonce[RP2P_STREAM_NONCE_SZ],
-    const unsigned char session_id[RP2P_STREAM_SESSION_ID_SZ],
-    uint8_t direction, uint32_t seq)
-{
-    memset(nonce, 0, RP2P_STREAM_NONCE_SZ);
-    memcpy(nonce, session_id, RP2P_STREAM_SESSION_ID_SZ);
-    nonce[16] = direction;
-    rp2p_store_u32_le(nonce + 20, seq);
-}
-
-/**
  * Reports the currently advertised receive window.
  * @return Available receive slots.
  */
@@ -1283,7 +1191,7 @@ static uint16_t rp2p_stream_advertised_window(const rp2p_stream_state_t *st) {
  */
 static void rp2p_stream_init(rp2p_stream_state_t *st, int initiator,
     const unsigned char session_id[RP2P_STREAM_SESSION_ID_SZ],
-    const char *session_hex, const char *secret, const char *initiator_id,
+    const char *session_hex, const char *initiator_id,
     const char *target_id, uint8_t transport_protocol)
 {
     size_t initiator_len;
@@ -1314,11 +1222,6 @@ static void rp2p_stream_init(rp2p_stream_state_t *st, int initiator,
     st->last_hello_ms = 0;
     st->last_keepalive_ms = st->last_rx_ms;
     st->rto_ms = RP2P_STREAM_RTO_MS;
-    if (secret && secret[0]) {
-        crypto_blake2b(st->crypto.psk, sizeof(st->crypto.psk),
-            (const unsigned char *)secret, strlen(secret));
-        st->crypto.authenticated = 1;
-    }
 }
 
 /**
@@ -1359,136 +1262,6 @@ static int rp2p_stream_send_raw(rp2p_t *ctx, rp2p_fd_t fd,
 }
 
 /**
- * Builds transcript input for session key derivation.
- * @return None.
- */
-static void rp2p_stream_build_kdf_input(unsigned char *buf, size_t *len,
-    const rp2p_stream_state_t *st)
-{
-    static const char domain[] = "rp2p-stream-v1-transcript";
-    const unsigned char *init_pub;
-    const unsigned char *resp_pub;
-    const unsigned char *init_nonce;
-    const unsigned char *resp_nonce;
-    size_t init_len;
-    size_t target_len;
-    size_t pos;
-
-    init_pub = st->initiator ? st->crypto.local_public : st->crypto.peer_public;
-    resp_pub = st->initiator ? st->crypto.peer_public : st->crypto.local_public;
-    init_nonce = st->initiator ? st->crypto.local_nonce : st->crypto.peer_nonce;
-    resp_nonce = st->initiator ? st->crypto.peer_nonce : st->crypto.local_nonce;
-
-    init_len = strlen(st->initiator_id);
-    target_len = strlen(st->target_id);
-    pos = 0;
-    memcpy(buf + pos, domain, sizeof(domain) - 1);
-    pos += sizeof(domain) - 1;
-    buf[pos++] = RP2P_STREAM_VERSION;
-    memcpy(buf + pos, st->session_id, RP2P_STREAM_SESSION_ID_SZ);
-    pos += RP2P_STREAM_SESSION_ID_SZ;
-    buf[pos++] = (unsigned char)init_len;
-    memcpy(buf + pos, st->initiator_id, init_len);
-    pos += init_len;
-    buf[pos++] = (unsigned char)target_len;
-    memcpy(buf + pos, st->target_id, target_len);
-    pos += target_len;
-    buf[pos++] = st->transport_protocol;
-    buf[pos++] = RP2P_STREAM_ROLE_INITIATOR;
-    buf[pos++] = RP2P_STREAM_ROLE_RESPONDER;
-    memcpy(buf + pos, init_pub, 32);
-    pos += 32;
-    memcpy(buf + pos, resp_pub, 32);
-    pos += 32;
-    memcpy(buf + pos, init_nonce, RP2P_STREAM_HELLO_NONCE_SZ);
-    pos += RP2P_STREAM_HELLO_NONCE_SZ;
-    memcpy(buf + pos, resp_nonce, RP2P_STREAM_HELLO_NONCE_SZ);
-    pos += RP2P_STREAM_HELLO_NONCE_SZ;
-    *len = pos;
-}
-
-/**
- * Derives one directional key from shared secret material.
- * @return None.
- */
-static void rp2p_stream_derive_key(unsigned char out[32], const unsigned char shared[32],
-    const unsigned char *kdf, size_t kdf_len, const char *label)
-{
-    unsigned char msg[RP2P_STREAM_TRANSCRIPT_MAX + 32];
-    size_t label_len = strlen(label);
-
-    memcpy(msg, kdf, kdf_len);
-    memcpy(msg + kdf_len, label, label_len);
-    crypto_blake2b_keyed(out, 32, shared, 32, msg, kdf_len + label_len);
-    crypto_wipe(msg, sizeof(msg));
-}
-
-/**
- * Completes stream key derivation when peer material arrives.
- * @return 1 when ready, 0 when peer material is incomplete.
- */
-static int rp2p_stream_crypto_ready(rp2p_stream_state_t *st) {
-    unsigned char shared[32];
-    unsigned char raw_shared[32];
-    unsigned char kdf[RP2P_STREAM_TRANSCRIPT_MAX];
-    size_t kdf_len;
-
-    if (st->crypto.ready) return 1;
-    if (st->crypto.peer_public[0] == 0 &&
-        memcmp(st->crypto.peer_public, (unsigned char[32]){0}, 32) == 0)
-        return 0;
-    if (crypto_verify32(st->crypto.local_public, st->crypto.peer_public) == 0)
-        return 0;
-    crypto_x25519(raw_shared, st->crypto.local_secret,
-        st->crypto.peer_public);
-    if (memcmp(raw_shared, (unsigned char[32]){0}, sizeof(raw_shared)) == 0) {
-        crypto_wipe(raw_shared, sizeof(raw_shared));
-        return 0;
-    }
-    if (st->crypto.authenticated) {
-        crypto_blake2b_keyed(shared, sizeof(shared), st->crypto.psk,
-            sizeof(st->crypto.psk), raw_shared, sizeof(raw_shared));
-    } else {
-        memcpy(shared, raw_shared, sizeof(shared));
-    }
-    rp2p_stream_build_kdf_input(kdf, &kdf_len, st);
-    if (st->initiator) {
-        rp2p_stream_derive_key(st->crypto.tx_key, shared, kdf, kdf_len,
-            "rp2p-stream-v1-c2s");
-        rp2p_stream_derive_key(st->crypto.rx_key, shared, kdf, kdf_len,
-            "rp2p-stream-v1-s2c");
-    } else {
-        rp2p_stream_derive_key(st->crypto.tx_key, shared, kdf, kdf_len,
-            "rp2p-stream-v1-s2c");
-        rp2p_stream_derive_key(st->crypto.rx_key, shared, kdf, kdf_len,
-            "rp2p-stream-v1-c2s");
-    }
-    st->crypto.ready = 1;
-    crypto_wipe(shared, sizeof(shared));
-    crypto_wipe(raw_shared, sizeof(raw_shared));
-    crypto_wipe(kdf, sizeof(kdf));
-    return 1;
-}
-
-/**
- * Generates local ephemeral keys and hello nonce.
- * @return 1 on success, 0 on error.
- */
-static int rp2p_stream_crypto_init(rp2p_stream_state_t *st) {
-    if (rp2p_fill_random(st->crypto.local_secret, 32) != 0) {
-        crypto_wipe(&st->crypto, sizeof(st->crypto));
-        return 0;
-    }
-    if (rp2p_fill_random(st->crypto.local_nonce,
-        RP2P_STREAM_HELLO_NONCE_SZ) != 0) {
-        crypto_wipe(&st->crypto, sizeof(st->crypto));
-        return 0;
-    }
-    crypto_x25519_public_key(st->crypto.local_public, st->crypto.local_secret);
-    return 1;
-}
-
-/**
  * Counts currently unacknowledged reliable frames.
  * @return In-flight frame count.
  */
@@ -1517,9 +1290,6 @@ static int rp2p_stream_can_send_data(const rp2p_stream_state_t *st) {
 static size_t rp2p_stream_pack_hello(uint8_t type, const rp2p_stream_state_t *st,
     unsigned char *out)
 {
-    static const char domain[] = "rp2p-stream-v1-hello";
-    unsigned char mac_input[RP2P_STREAM_HELLO_BASE_SZ + sizeof(domain) - 1];
-    unsigned char tag[RP2P_STREAM_HELLO_TAG_SZ];
     size_t init_len;
     size_t target_len;
 
@@ -1530,10 +1300,8 @@ static size_t rp2p_stream_pack_hello(uint8_t type, const rp2p_stream_state_t *st
     out[4] = RP2P_STREAM_VERSION;
     out[5] = type;
     out[6] = st->tx_direction;
-    out[7] = st->crypto.authenticated ? 1 : 0;
+    out[7] = 0;
     memcpy(out + 8, st->session_id, RP2P_STREAM_SESSION_ID_SZ);
-    memcpy(out + 24, st->crypto.local_public, 32);
-    memcpy(out + 56, st->crypto.local_nonce, RP2P_STREAM_HELLO_NONCE_SZ);
     out[72] = st->transport_protocol;
     out[73] = st->initiator ? RP2P_STREAM_ROLE_INITIATOR :
         RP2P_STREAM_ROLE_RESPONDER;
@@ -1541,16 +1309,7 @@ static size_t rp2p_stream_pack_hello(uint8_t type, const rp2p_stream_state_t *st
     out[75] = (unsigned char)target_len;
     memcpy(out + 76, st->initiator_id, init_len);
     memcpy(out + 139, st->target_id, target_len);
-    if (!st->crypto.authenticated) return RP2P_STREAM_HELLO_BASE_SZ;
-    memcpy(mac_input, domain, sizeof(domain) - 1);
-    memcpy(mac_input + sizeof(domain) - 1, out,
-        RP2P_STREAM_HELLO_BASE_SZ);
-    crypto_blake2b_keyed(tag, sizeof(tag), st->crypto.psk,
-        sizeof(st->crypto.psk), mac_input, sizeof(mac_input));
-    memcpy(out + RP2P_STREAM_HELLO_BASE_SZ, tag, sizeof(tag));
-    crypto_wipe(tag, sizeof(tag));
-    crypto_wipe(mac_input, sizeof(mac_input));
-    return RP2P_STREAM_HELLO_BASE_SZ + RP2P_STREAM_HELLO_TAG_SZ;
+    return RP2P_STREAM_HELLO_BASE_SZ;
 }
 
 /**
@@ -1560,24 +1319,15 @@ static size_t rp2p_stream_pack_hello(uint8_t type, const rp2p_stream_state_t *st
 static int rp2p_stream_unpack_hello(const rp2p_stream_state_t *st,
     const unsigned char *buf, size_t len,
     uint8_t *type, uint8_t *direction,
-    unsigned char session_id[RP2P_STREAM_SESSION_ID_SZ],
-    unsigned char peer_public[32],
-    unsigned char peer_nonce[RP2P_STREAM_HELLO_NONCE_SZ])
+    unsigned char session_id[RP2P_STREAM_SESSION_ID_SZ])
 {
-    static const char domain[] = "rp2p-stream-v1-hello";
-    unsigned char mac_input[RP2P_STREAM_HELLO_BASE_SZ + sizeof(domain) - 1];
-    unsigned char tag[RP2P_STREAM_HELLO_TAG_SZ];
     uint8_t expected_role;
     size_t init_len;
     size_t target_len;
-    int has_auth;
 
     if (len < RP2P_STREAM_HELLO_BASE_SZ) return 0;
     if (rp2p_load_u32_le(buf) != RP2P_STREAM_MAGIC) return 0;
     if (buf[4] != RP2P_STREAM_VERSION) return 0;
-    if ((buf[7] & ~1u) != 0) return 0;
-    has_auth = (buf[7] & 1) != 0;
-    if (has_auth != st->crypto.authenticated) return 0;
     expected_role = st->initiator ? RP2P_STREAM_ROLE_RESPONDER :
         RP2P_STREAM_ROLE_INITIATOR;
     init_len = strlen(st->initiator_id);
@@ -1591,108 +1341,14 @@ static int rp2p_stream_unpack_hello(const rp2p_stream_state_t *st,
         memcmp(buf + 139 + target_len,
             (unsigned char[RP2P_ID_MAX]){0}, RP2P_ID_MAX - target_len) != 0)
         return 0;
-    if (has_auth) {
-        if (len != RP2P_STREAM_HELLO_BASE_SZ + RP2P_STREAM_HELLO_TAG_SZ)
-            return 0;
-        memcpy(mac_input, domain, sizeof(domain) - 1);
-        memcpy(mac_input + sizeof(domain) - 1, buf,
-            RP2P_STREAM_HELLO_BASE_SZ);
-        crypto_blake2b_keyed(tag, sizeof(tag), st->crypto.psk,
-            sizeof(st->crypto.psk), mac_input, sizeof(mac_input));
-        if (crypto_verify16(tag,
-            buf + RP2P_STREAM_HELLO_BASE_SZ) != 0)
-        {
-            crypto_wipe(tag, sizeof(tag));
-            crypto_wipe(mac_input, sizeof(mac_input));
-            return 0;
-        }
-        crypto_wipe(tag, sizeof(tag));
-        crypto_wipe(mac_input, sizeof(mac_input));
-    } else if (len != RP2P_STREAM_HELLO_BASE_SZ) {
-        return 0;
-    }
     *type = buf[5];
     *direction = buf[6];
     memcpy(session_id, buf + 8, RP2P_STREAM_SESSION_ID_SZ);
-    memcpy(peer_public, buf + 24, 32);
-    memcpy(peer_nonce, buf + 56, RP2P_STREAM_HELLO_NONCE_SZ);
     return 1;
 }
 
 /**
- * Computes one transcript key-confirmation tag.
- * @return None.
- */
-static void rp2p_stream_confirm_tag(unsigned char tag[32],
-    const rp2p_stream_state_t *st, const unsigned char key[32], uint8_t type,
-    uint8_t role)
-{
-    static const char domain[] = "rp2p-stream-v1-confirm";
-    unsigned char input[RP2P_STREAM_TRANSCRIPT_MAX + sizeof(domain) + 1];
-    size_t transcript_len;
-    size_t pos;
-
-    memcpy(input, domain, sizeof(domain) - 1);
-    pos = sizeof(domain) - 1;
-    rp2p_stream_build_kdf_input(input + pos, &transcript_len, st);
-    pos += transcript_len;
-    input[pos++] = type;
-    input[pos++] = role;
-    crypto_blake2b_keyed(tag, 32, key, 32, input, pos);
-    crypto_wipe(input, sizeof(input));
-}
-
-/**
- * Packs one final transcript key-confirmation frame.
- * @return Encoded frame length.
- */
-static size_t rp2p_stream_pack_confirm(const rp2p_stream_state_t *st,
-    uint8_t type, unsigned char out[RP2P_STREAM_CONFIRM_SZ])
-{
-    uint8_t role;
-
-    role = st->initiator ? RP2P_STREAM_ROLE_INITIATOR :
-        RP2P_STREAM_ROLE_RESPONDER;
-    rp2p_store_u32_le(out, RP2P_STREAM_MAGIC);
-    out[4] = RP2P_STREAM_VERSION;
-    out[5] = type;
-    out[6] = role;
-    out[7] = st->crypto.authenticated ? 1 : 0;
-    memcpy(out + 8, st->session_id, RP2P_STREAM_SESSION_ID_SZ);
-    rp2p_stream_confirm_tag(out + 24, st, st->crypto.tx_key, type, role);
-    return RP2P_STREAM_CONFIRM_SZ;
-}
-
-/**
- * Verifies one final transcript key-confirmation frame.
- * @return 1 on valid confirmation, 0 on mismatch.
- */
-static int rp2p_stream_unpack_confirm(const rp2p_stream_state_t *st,
-    const unsigned char *buf, size_t len, uint8_t expected_type)
-{
-    unsigned char expected[32];
-    uint8_t expected_role;
-    int valid;
-
-    if (len != RP2P_STREAM_CONFIRM_SZ) return 0;
-    if (rp2p_load_u32_le(buf) != RP2P_STREAM_MAGIC ||
-        buf[4] != RP2P_STREAM_VERSION || buf[5] != expected_type)
-        return 0;
-    expected_role = st->initiator ? RP2P_STREAM_ROLE_RESPONDER :
-        RP2P_STREAM_ROLE_INITIATOR;
-    if (buf[6] != expected_role || buf[7] !=
-        (st->crypto.authenticated ? 1 : 0) ||
-        memcmp(buf + 8, st->session_id, RP2P_STREAM_SESSION_ID_SZ) != 0)
-        return 0;
-    rp2p_stream_confirm_tag(expected, st, st->crypto.rx_key,
-        expected_type, expected_role);
-    valid = crypto_verify32(expected, buf + 24) == 0;
-    crypto_wipe(expected, sizeof(expected));
-    return valid;
-}
-
-/**
- * Encodes one authenticated stream header.
+ * Encodes one stream header.
  * @return Encoded header length.
  */
 static size_t rp2p_stream_pack_header(const rp2p_stream_header_t *hdr,
@@ -1714,13 +1370,13 @@ static size_t rp2p_stream_pack_header(const rp2p_stream_header_t *hdr,
 }
 
 /**
- * Parses one authenticated stream header.
+ * Parses one stream header.
  * @return 1 on success, 0 on error.
  */
 static int rp2p_stream_unpack_header(const unsigned char *buf, size_t len,
     rp2p_stream_header_t *hdr)
 {
-    if (len < 60) return 0;
+    if (len < RP2P_STREAM_HEADER_SZ) return 0;
     if (rp2p_load_u32_le(buf) != RP2P_STREAM_MAGIC) return 0;
     if (buf[4] != RP2P_STREAM_VERSION) return 0;
     if (buf[7] != 0) return 0;
@@ -1736,439 +1392,8 @@ static int rp2p_stream_unpack_header(const unsigned char *buf, size_t len,
     if (hdr->type < RP2P_STREAM_TYPE_DATA ||
         hdr->type > RP2P_STREAM_TYPE_PONG || hdr->seq == 0)
         return 0;
-    if ((size_t)(60 + hdr->payload_len) > len) return 0;
+    if (RP2P_STREAM_HEADER_SZ + (size_t)hdr->payload_len > len) return 0;
     return 1;
-}
-
-/**
- * Encrypts one post-handshake stream packet.
- * @return 1 on success, 0 on error.
- */
-static int rp2p_stream_encrypt_packet(rp2p_stream_state_t *st,
-    const rp2p_stream_header_t *hdr, const unsigned char *plain,
-    size_t plain_len, unsigned char *out, size_t *out_len)
-{
-    unsigned char nonce[RP2P_STREAM_NONCE_SZ];
-    size_t ad_len = rp2p_stream_pack_header(hdr, out);
-    unsigned char *mac = out + ad_len;
-    unsigned char *cipher = out + ad_len + RP2P_STREAM_TAG_SZ;
-
-    if (ad_len + RP2P_STREAM_TAG_SZ + plain_len > RP2P_STREAM_MAX_FRAME)
-        return 0;
-    rp2p_stream_nonce(nonce, hdr->session_id, hdr->direction, hdr->seq);
-    crypto_aead_lock(cipher, mac, st->crypto.tx_key, nonce, out, ad_len,
-        plain, plain_len);
-    *out_len = ad_len + RP2P_STREAM_TAG_SZ + plain_len;
-    return 1;
-}
-
-/**
- * Authenticates and decrypts one post-handshake stream packet.
- * @return 1 on success, 0 on authentication failure.
- */
-static int rp2p_stream_decrypt_packet(rp2p_stream_state_t *st,
-    const rp2p_stream_header_t *hdr, const unsigned char *buf,
-    unsigned char *plain)
-{
-    unsigned char nonce[RP2P_STREAM_NONCE_SZ];
-    size_t ad_len = 44;
-    const unsigned char *mac = buf + ad_len;
-    const unsigned char *cipher = buf + ad_len + RP2P_STREAM_TAG_SZ;
-
-    rp2p_stream_nonce(nonce, hdr->session_id, hdr->direction, hdr->seq);
-    return crypto_aead_unlock(plain, mac, st->crypto.rx_key, nonce, buf,
-        ad_len, cipher, hdr->payload_len) == 0;
-}
-
-/**
- * Initializes raw UDP authentication state for one rendezvous session.
- * @return 1 on success, 0 on invalid input.
- */
-static int rp2p_udp_crypto_init(rp2p_udp_crypto_t *state,
-    const char *secret, const char *session_token, const char *initiator_id,
-    const char *target_id, int initiator)
-{
-    unsigned char secret_key[32];
-    unsigned char master[32];
-    unsigned char material[256];
-    static const char c2s[] = "rp2p-udp-v1-c2s";
-    static const char s2c[] = "rp2p-udp-v1-s2c";
-    unsigned char c2s_key[32];
-    unsigned char s2c_key[32];
-    size_t token_len;
-    size_t initiator_len;
-    size_t target_len;
-    size_t pos;
-
-    memset(state, 0, sizeof(*state));
-    if (!session_token || !initiator_id || !target_id) return 0;
-    token_len = strlen(session_token);
-    initiator_len = strlen(initiator_id);
-    target_len = strlen(target_id);
-    if (token_len == 0 || token_len > RP2P_CTRL_SESSION_MAX) return 0;
-    pos = 0;
-    memcpy(material + pos, "rp2p-udp-v1-session", 19);
-    pos += 19;
-    material[pos++] = (unsigned char)token_len;
-    memcpy(material + pos, session_token, token_len);
-    pos += token_len;
-    material[pos++] = (unsigned char)initiator_len;
-    memcpy(material + pos, initiator_id, initiator_len);
-    pos += initiator_len;
-    material[pos++] = (unsigned char)target_len;
-    memcpy(material + pos, target_id, target_len);
-    pos += target_len;
-    crypto_blake2b(state->session_id, sizeof(state->session_id), material, pos);
-    state->enabled = secret && secret[0];
-    if (state->enabled) {
-        crypto_blake2b(secret_key, sizeof(secret_key),
-            (const unsigned char *)secret, strlen(secret));
-        crypto_blake2b_keyed(master, sizeof(master), secret_key,
-            sizeof(secret_key), material, pos);
-        crypto_blake2b_keyed(c2s_key, sizeof(c2s_key), master,
-            sizeof(master), (const unsigned char *)c2s, sizeof(c2s) - 1);
-        crypto_blake2b_keyed(s2c_key, sizeof(s2c_key), master,
-            sizeof(master), (const unsigned char *)s2c, sizeof(s2c) - 1);
-    }
-    state->tx_direction = initiator ? RP2P_STREAM_DIR_C2S :
-        RP2P_STREAM_DIR_S2C;
-    state->rx_direction = initiator ? RP2P_STREAM_DIR_S2C :
-        RP2P_STREAM_DIR_C2S;
-    state->tx_seq = 1;
-    if (state->enabled && initiator) {
-        memcpy(state->tx_key, c2s_key, sizeof(state->tx_key));
-        memcpy(state->rx_key, s2c_key, sizeof(state->rx_key));
-    } else if (state->enabled) {
-        memcpy(state->tx_key, s2c_key, sizeof(state->tx_key));
-        memcpy(state->rx_key, c2s_key, sizeof(state->rx_key));
-    }
-    crypto_wipe(secret_key, sizeof(secret_key));
-    crypto_wipe(master, sizeof(master));
-    crypto_wipe(c2s_key, sizeof(c2s_key));
-    crypto_wipe(s2c_key, sizeof(s2c_key));
-    crypto_wipe(material, sizeof(material));
-    return 1;
-}
-
-/**
- * Builds one UDP security-mode negotiation packet.
- * @return Encoded packet length.
- */
-static size_t rp2p_udp_build_negotiation(const rp2p_udp_crypto_t *state,
-    int initiator, unsigned char out[RP2P_UDP_NEGOTIATE_SZ])
-{
-    static const char domain[] = "rp2p-udp-v1-negotiate";
-    unsigned char input[sizeof(domain) - 1 + 16];
-
-    memset(out, 0, RP2P_UDP_NEGOTIATE_SZ);
-    rp2p_store_u32_le(out, RP2P_UDP_NEGOTIATE_MAGIC);
-    out[4] = RP2P_UDP_VERSION;
-    out[5] = state->enabled ? RP2P_UDP_MODE_SECURE : RP2P_UDP_MODE_PLAIN;
-    out[6] = initiator ? RP2P_STREAM_ROLE_INITIATOR :
-        RP2P_STREAM_ROLE_RESPONDER;
-    memcpy(out + 8, state->session_id, sizeof(state->session_id));
-    if (!state->enabled) return RP2P_UDP_NEGOTIATE_SZ;
-    memcpy(input, domain, sizeof(domain) - 1);
-    memcpy(input + sizeof(domain) - 1, out, 16);
-    crypto_blake2b_keyed(out + 16, 32, state->tx_key,
-        sizeof(state->tx_key), input, sizeof(input));
-    crypto_wipe(input, sizeof(input));
-    return RP2P_UDP_NEGOTIATE_SZ;
-}
-
-/**
- * Validates one peer UDP security-mode negotiation packet.
- * @return RP2P_OK on agreement or a categorized protocol error.
- */
-static int rp2p_udp_check_negotiation(rp2p_t *ctx,
-    const rp2p_udp_crypto_t *state, int initiator, const unsigned char *packet,
-    size_t packet_len)
-{
-    static const char domain[] = "rp2p-udp-v1-negotiate";
-    unsigned char input[sizeof(domain) - 1 + 16];
-    unsigned char expected[32];
-    uint8_t peer_mode;
-    uint8_t peer_role;
-
-    if (packet_len != RP2P_UDP_NEGOTIATE_SZ ||
-        rp2p_load_u32_le(packet) != RP2P_UDP_NEGOTIATE_MAGIC ||
-        packet[7] != 0)
-    {
-        rp2p_set_error(ctx, "udp: malformed security negotiation");
-        return RP2P_EPROTO;
-    }
-    if (packet[4] != RP2P_UDP_VERSION) {
-        rp2p_set_error(ctx, "udp: unsupported negotiation version %u",
-            (unsigned)packet[4]);
-        return RP2P_EVERSION;
-    }
-    peer_mode = packet[5];
-    peer_role = initiator ? RP2P_STREAM_ROLE_RESPONDER :
-        RP2P_STREAM_ROLE_INITIATOR;
-    if (peer_mode > RP2P_UDP_MODE_SECURE || packet[6] != peer_role ||
-        memcmp(packet + 8, state->session_id,
-            sizeof(state->session_id)) != 0)
-    {
-        rp2p_set_error(ctx, "udp: negotiation session or role mismatch");
-        return RP2P_EPROTO;
-    }
-    if (peer_mode != (state->enabled ? RP2P_UDP_MODE_SECURE :
-        RP2P_UDP_MODE_PLAIN))
-    {
-        rp2p_set_error(ctx, "udp: peer security mode does not match local mode");
-        return RP2P_EAUTH;
-    }
-    if (!state->enabled) {
-        if (memcmp(packet + 16, (unsigned char[32]){0}, 32) != 0) {
-            rp2p_set_error(ctx, "udp: plaintext negotiation contains proof");
-            return RP2P_EPROTO;
-        }
-        return RP2P_OK;
-    }
-    memcpy(input, domain, sizeof(domain) - 1);
-    memcpy(input + sizeof(domain) - 1, packet, 16);
-    crypto_blake2b_keyed(expected, sizeof(expected), state->rx_key,
-        sizeof(state->rx_key), input, sizeof(input));
-    crypto_wipe(input, sizeof(input));
-    if (crypto_verify32(expected, packet + 16) != 0) {
-        crypto_wipe(expected, sizeof(expected));
-        rp2p_set_error(ctx, "udp: negotiation authentication failed");
-        return RP2P_EAUTH;
-    }
-    crypto_wipe(expected, sizeof(expected));
-    return RP2P_OK;
-}
-
-/**
- * Exchanges and verifies the direct UDP security mode with one selected peer.
- * @return RP2P_OK on agreement or a categorized negotiation error.
- */
-static int rp2p_udp_negotiate(rp2p_t *ctx, rp2p_fd_t fd,
-    const struct sockaddr_storage *peer_addr, rp2p_udp_crypto_t *state,
-    int initiator)
-{
-    unsigned char outgoing[RP2P_UDP_NEGOTIATE_SZ];
-    unsigned char incoming[RP2P_UDP_NEGOTIATE_SZ + 1];
-    socklen_t peer_len;
-    int attempt;
-
-    rp2p_udp_build_negotiation(state, initiator, outgoing);
-    peer_len = rp2p_sockaddr_len(peer_addr);
-    if (peer_len == 0) return RP2P_EPROTO;
-    for (attempt = 0; attempt < 6; attempt++) {
-        fd_set fds;
-        struct timeval tv;
-        struct sockaddr_storage from;
-        socklen_t from_len;
-        int n;
-
-        if (sendto(fd, (const char *)outgoing, sizeof(outgoing), 0,
-            (const struct sockaddr *)peer_addr, peer_len) < 0)
-            return RP2P_ENET;
-        FD_ZERO(&fds);
-        if (!rp2p_fdset_add(fd, &fds, NULL)) return RP2P_ENET;
-        tv.tv_sec = 0;
-        tv.tv_usec = 500000;
-        n = select((int)(fd + 1), &fds, NULL, NULL, &tv);
-        if (n <= 0) continue;
-        from_len = sizeof(from);
-        n = (int)recvfrom(fd, (char *)incoming, sizeof(incoming), 0,
-            (struct sockaddr *)&from, &from_len);
-        if (n < 0) continue;
-        if (!rp2p_sockaddr_equal(&from, peer_addr)) continue;
-        if (n < 4 || rp2p_load_u32_le(incoming) !=
-            RP2P_UDP_NEGOTIATE_MAGIC)
-        {
-            if (((size_t)n >= strlen(RP2P_CTRTOK_PUNCH) &&
-                memcmp(incoming, RP2P_CTRTOK_PUNCH,
-                    strlen(RP2P_CTRTOK_PUNCH)) == 0) ||
-                ((size_t)n >= strlen(RP2P_CTRTOK_PUNCH_PING) &&
-                memcmp(incoming, RP2P_CTRTOK_PUNCH_PING,
-                    strlen(RP2P_CTRTOK_PUNCH_PING)) == 0) ||
-                ((size_t)n >= strlen(RP2P_CTRTOK_PUNCH_PONG) &&
-                memcmp(incoming, RP2P_CTRTOK_PUNCH_PONG,
-                    strlen(RP2P_CTRTOK_PUNCH_PONG)) == 0))
-                continue;
-            rp2p_set_error(ctx, "udp: malformed security negotiation");
-            return RP2P_EPROTO;
-        }
-        n = rp2p_udp_check_negotiation(ctx, state, initiator, incoming,
-            (size_t)n);
-        if (n != RP2P_OK) return n;
-        state->negotiated = 1;
-        return RP2P_OK;
-    }
-    rp2p_set_error(ctx, "udp: security negotiation timed out");
-    return RP2P_EPUNCH;
-}
-
-/**
- * Handles one post-establishment UDP negotiation retransmission.
- * @return 1 when handled, 0 when not a negotiation, -1 when invalid.
- */
-static int rp2p_udp_handle_negotiation(rp2p_t *ctx, rp2p_fd_t fd,
-    const struct sockaddr_storage *peer_addr, rp2p_udp_crypto_t *state,
-    int initiator, const unsigned char *packet, size_t packet_len)
-{
-    unsigned char reply[RP2P_UDP_NEGOTIATE_SZ];
-    int result;
-
-    if (packet_len < 4 || rp2p_load_u32_le(packet) !=
-        RP2P_UDP_NEGOTIATE_MAGIC)
-        return 0;
-    result = rp2p_udp_check_negotiation(ctx, state, initiator, packet,
-        packet_len);
-    if (result != RP2P_OK) return -1;
-    rp2p_udp_build_negotiation(state, initiator, reply);
-    if (rp2p_sendto_addr(fd, reply, sizeof(reply), peer_addr) < 0) return -1;
-    return 1;
-}
-
-/**
- * Builds one raw UDP AEAD nonce.
- * @return None.
- */
-static void rp2p_udp_nonce(unsigned char nonce[24],
-    const rp2p_udp_crypto_t *state, uint8_t direction, uint64_t seq)
-{
-    memset(nonce, 0, 24);
-    memcpy(nonce, state->session_id, sizeof(state->session_id));
-    nonce[8] = direction;
-    rp2p_store_u64_le(nonce + 16, seq);
-}
-
-/**
- * Records one authenticated sequence in the replay window.
- * @return 1 for a new sequence, 0 for stale or duplicate input.
- */
-static int rp2p_udp_replay_accept(rp2p_udp_crypto_t *state, uint64_t seq) {
-    uint64_t delta;
-
-    if (seq == 0) return 0;
-    if (seq > state->rx_max) {
-        delta = seq - state->rx_max;
-        state->rx_window = delta >= 64 ? 1 :
-            (state->rx_window << delta) | 1;
-        state->rx_max = seq;
-        return 1;
-    }
-    delta = state->rx_max - seq;
-    if (delta >= 64 || (state->rx_window & ((uint64_t)1 << delta)) != 0)
-        return 0;
-    state->rx_window |= (uint64_t)1 << delta;
-    return 1;
-}
-
-/**
- * Encodes one negotiated raw UDP data or keepalive packet.
- * @return RP2P_OK on success or a categorized error.
- */
-static int rp2p_udp_encrypt(rp2p_t *ctx, rp2p_udp_crypto_t *state,
-    uint8_t type, const unsigned char *plain, size_t plain_len,
-    unsigned char *out, size_t out_cap, size_t *out_len)
-{
-    unsigned char nonce[24];
-    uint64_t seq;
-
-    if (!state->negotiated || !out_len ||
-        (type != RP2P_UDP_TYPE_DATA && type != RP2P_UDP_TYPE_KEEPALIVE))
-    {
-        rp2p_set_error(ctx, "udp: packet requested before valid negotiation");
-        return RP2P_EPROTO;
-    }
-    if (plain_len > RP2P_UDP_PAYLOAD_MAX) {
-        rp2p_set_error(ctx, "udp: payload %lu exceeds maximum %d",
-            (unsigned long)plain_len, RP2P_UDP_PAYLOAD_MAX);
-        return RP2P_EINVAL;
-    }
-    if (!state->enabled) {
-        if (type != RP2P_UDP_TYPE_DATA || plain_len > out_cap)
-            return RP2P_EPROTO;
-        if (plain_len > 0) memcpy(out, plain, plain_len);
-        *out_len = plain_len;
-        return RP2P_OK;
-    }
-    if (out_cap < RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ ||
-        plain_len > out_cap - RP2P_UDP_HEADER_SZ - RP2P_UDP_TAG_SZ)
-        return RP2P_EINVAL;
-    if (state->tx_seq == 0) return RP2P_ECRYPTO;
-    seq = state->tx_seq++;
-    rp2p_store_u32_le(out, RP2P_UDP_MAGIC);
-    out[4] = RP2P_UDP_VERSION;
-    out[5] = state->tx_direction;
-    out[6] = type;
-    out[7] = 0;
-    memcpy(out + 8, state->session_id, sizeof(state->session_id));
-    rp2p_store_u64_le(out + 16, seq);
-    rp2p_udp_nonce(nonce, state, state->tx_direction, seq);
-    crypto_aead_lock(out + RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ,
-        out + RP2P_UDP_HEADER_SZ, state->tx_key, nonce, out,
-        RP2P_UDP_HEADER_SZ, plain, plain_len);
-    *out_len = RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ + plain_len;
-    return RP2P_OK;
-}
-
-/**
- * Decodes one negotiated raw UDP packet with replay rejection.
- * @return RP2P_OK on success, including zero-length application data.
- */
-static int rp2p_udp_decrypt(rp2p_t *ctx, rp2p_udp_crypto_t *state,
-    const unsigned char *packet, size_t packet_len, unsigned char *plain,
-    size_t plain_cap, size_t *plain_len_out, uint8_t *type_out)
-{
-    unsigned char nonce[24];
-    size_t plain_len;
-    uint64_t seq;
-
-    if (!state->negotiated || !plain_len_out || !type_out) return RP2P_EPROTO;
-    if (!state->enabled) {
-        if (packet_len > RP2P_UDP_PAYLOAD_MAX || packet_len > plain_cap) {
-            rp2p_set_error(ctx, "udp: plaintext payload exceeds maximum %d",
-                RP2P_UDP_PAYLOAD_MAX);
-            return RP2P_EPROTO;
-        }
-        if (packet_len >= RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ &&
-            (rp2p_load_u32_le(packet) == RP2P_UDP_MAGIC ||
-            rp2p_load_u32_le(packet) == RP2P_UDP_NEGOTIATE_MAGIC))
-        {
-            rp2p_set_error(ctx, "udp: encrypted envelope received in plaintext mode");
-            return RP2P_EAUTH;
-        }
-        if (packet_len > 0) memcpy(plain, packet, packet_len);
-        *plain_len_out = packet_len;
-        *type_out = RP2P_UDP_TYPE_DATA;
-        return RP2P_OK;
-    }
-    if (packet_len < RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ) return RP2P_EPROTO;
-    if (rp2p_load_u32_le(packet) != RP2P_UDP_MAGIC ||
-        packet[4] != RP2P_UDP_VERSION ||
-        packet[5] != state->rx_direction ||
-        (packet[6] != RP2P_UDP_TYPE_DATA &&
-        packet[6] != RP2P_UDP_TYPE_KEEPALIVE) || packet[7] != 0)
-        return RP2P_EPROTO;
-    if (memcmp(packet + 8, state->session_id,
-        sizeof(state->session_id)) != 0)
-        return RP2P_EPROTO;
-    plain_len = packet_len - RP2P_UDP_HEADER_SZ - RP2P_UDP_TAG_SZ;
-    if (plain_len > RP2P_UDP_PAYLOAD_MAX || plain_len > plain_cap)
-        return RP2P_EPROTO;
-    seq = rp2p_load_u64_le(packet + 16);
-    rp2p_udp_nonce(nonce, state, state->rx_direction, seq);
-    if (crypto_aead_unlock(plain, packet + RP2P_UDP_HEADER_SZ, state->rx_key,
-        nonce, packet, RP2P_UDP_HEADER_SZ,
-        packet + RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ, plain_len) != 0)
-    {
-        rp2p_set_error(ctx, "udp: packet authentication failed");
-        return RP2P_EAUTH;
-    }
-    if (!rp2p_udp_replay_accept(state, seq)) {
-        crypto_wipe(plain, plain_len);
-        rp2p_set_error(ctx, "udp: replayed or stale packet");
-        return RP2P_EAUTH;
-    }
-    *plain_len_out = plain_len;
-    *type_out = packet[6];
-    return RP2P_OK;
 }
 
 /**
@@ -2258,7 +1483,7 @@ static void rp2p_stream_ack_until(rp2p_stream_state_t *st, uint32_t ack) {
 }
 
 /**
- * Sends one encrypted control frame.
+ * Sends one control frame.
  * @return 0 on success, -1 on error.
  */
 static int rp2p_stream_send_control(rp2p_t *ctx, rp2p_fd_t fd,
@@ -2287,8 +1512,7 @@ static int rp2p_stream_send_control(rp2p_t *ctx, rp2p_fd_t fd,
     hdr.gap_end = gap_end;
     memcpy(hdr.session_id, st->session_id, RP2P_STREAM_SESSION_ID_SZ);
 
-    if (!rp2p_stream_encrypt_packet(st, &hdr, NULL, 0, frame, &frame_len))
-        return -1;
+    frame_len = rp2p_stream_pack_header(&hdr, frame);
     if (rp2p_stream_send_raw(ctx, fd, peer_addr, st, frame, frame_len) != 0)
         return -1;
     st->last_tx_ms = rp2p_now_ms();
@@ -2303,7 +1527,7 @@ static int rp2p_stream_send_control(rp2p_t *ctx, rp2p_fd_t fd,
 static void rp2p_stream_fail(rp2p_t *ctx, rp2p_fd_t fd,
     const struct sockaddr_storage *peer_addr, rp2p_stream_state_t *st)
 {
-    if (!st->ready || !st->crypto.ready || st->reset_sent ||
+    if (!st->ready || st->reset_sent ||
         st->reset_received)
         return;
     st->reset_sent = 1;
@@ -2319,34 +1543,13 @@ static int rp2p_stream_send_hello(rp2p_t *ctx, rp2p_fd_t fd,
     const struct sockaddr_storage *peer_addr,
     rp2p_stream_state_t *st, uint8_t type)
 {
-    unsigned char frame[RP2P_STREAM_HELLO_BASE_SZ +
-        RP2P_STREAM_HELLO_TAG_SZ];
+    unsigned char frame[RP2P_STREAM_HELLO_BASE_SZ];
     size_t frame_len;
 
     frame_len = rp2p_stream_pack_hello(type, st, frame);
     if (rp2p_stream_send_raw(ctx, fd, peer_addr, st, frame, frame_len) != 0)
         return -1;
     st->hello_sent = 1;
-    st->last_hello_ms = rp2p_now_ms();
-    st->last_tx_ms = st->last_hello_ms;
-    return 0;
-}
-
-/**
- * Sends one final transcript key-confirmation frame.
- * @return 0 on success, -1 on transport error.
- */
-static int rp2p_stream_send_confirm(rp2p_t *ctx, rp2p_fd_t fd,
-    const struct sockaddr_storage *peer_addr, rp2p_stream_state_t *st,
-    uint8_t type)
-{
-    unsigned char frame[RP2P_STREAM_CONFIRM_SZ];
-    size_t frame_len;
-
-    frame_len = rp2p_stream_pack_confirm(st, type, frame);
-    if (rp2p_stream_send_raw(ctx, fd, peer_addr, st, frame, frame_len) != 0)
-        return -1;
-    st->confirm_sent = 1;
     st->last_hello_ms = rp2p_now_ms();
     st->last_tx_ms = st->last_hello_ms;
     return 0;
@@ -2384,9 +1587,13 @@ static int rp2p_stream_queue_reliable(rp2p_t *ctx, rp2p_fd_t fd,
     hdr.payload_len = (uint16_t)plain_len;
     memcpy(hdr.session_id, st->session_id, RP2P_STREAM_SESSION_ID_SZ);
 
-    if (!rp2p_stream_encrypt_packet(st, &hdr, plain, plain_len,
-        slot->frame, &frame_len))
-        return -1;
+    {
+        size_t hdr_len = rp2p_stream_pack_header(&hdr, slot->frame);
+        if (hdr_len + plain_len > RP2P_STREAM_MAX_FRAME)
+            return -1;
+        memcpy(slot->frame + hdr_len, plain, plain_len);
+        frame_len = hdr_len + plain_len;
+    }
     slot->used = 1;
     slot->type = type;
     slot->seq = hdr.seq;
@@ -2497,12 +1704,10 @@ static int rp2p_stream_process_packet(rp2p_t *ctx, rp2p_fd_t fd,
     uint8_t hello_type;
     uint8_t hello_dir;
     unsigned char hello_sid[RP2P_STREAM_SESSION_ID_SZ];
-    unsigned char hello_pub[32];
-    unsigned char hello_nonce[RP2P_STREAM_HELLO_NONCE_SZ];
     uint8_t frame_type;
 
     if (rp2p_stream_unpack_hello(st, buf, len, &hello_type, &hello_dir,
-        hello_sid, hello_pub, hello_nonce))
+        hello_sid))
     {
         if (((st->initiator && hello_type == RP2P_STREAM_TYPE_HELLO_ACK) ||
             (!st->initiator && hello_type == RP2P_STREAM_TYPE_HELLO)) &&
@@ -2510,22 +1715,18 @@ static int rp2p_stream_process_packet(rp2p_t *ctx, rp2p_fd_t fd,
             memcmp(hello_sid, st->session_id, RP2P_STREAM_SESSION_ID_SZ) == 0)
         {
             if (st->ready) return 0;
-            memcpy(st->crypto.peer_public, hello_pub, 32);
-            memcpy(st->crypto.peer_nonce, hello_nonce,
-                RP2P_STREAM_HELLO_NONCE_SZ);
             st->hello_acked = (hello_type == RP2P_STREAM_TYPE_HELLO_ACK);
             st->last_rx_ms = rp2p_now_ms();
             rp2p_stream_log("rp2p: stream selected endpoint %s\n",
                 st->session_hex);
-            if (!rp2p_stream_crypto_ready(st)) {
-                rp2p_set_error(ctx, "stream: invalid peer key material");
-                return -1;
-            }
             if (hello_type == RP2P_STREAM_TYPE_HELLO) {
                 if (rp2p_stream_send_hello(ctx, fd, peer_addr, st,
                     RP2P_STREAM_TYPE_HELLO_ACK) != 0)
                     return -1;
             }
+            st->ready = 1;
+            rp2p_stream_log("rp2p: tcp session %s stream ready\n",
+                st->session_hex);
             return 0;
         }
     }
@@ -2540,43 +1741,9 @@ static int rp2p_stream_process_packet(rp2p_t *ctx, rp2p_fd_t fd,
         if (frame_type == RP2P_STREAM_TYPE_HELLO ||
             frame_type == RP2P_STREAM_TYPE_HELLO_ACK)
         {
-            rp2p_set_error(ctx, st->crypto.authenticated ?
-                "stream: HELLO authentication or identity mismatch" :
+            rp2p_set_error(ctx,
                 "stream: HELLO protocol or identity mismatch");
             return -1;
-        }
-        if (frame_type == RP2P_STREAM_TYPE_CONFIRM ||
-            frame_type == RP2P_STREAM_TYPE_CONFIRM_ACK)
-        {
-            uint8_t expected_type = st->initiator ?
-                RP2P_STREAM_TYPE_CONFIRM_ACK : RP2P_STREAM_TYPE_CONFIRM;
-
-            if (!st->crypto.ready || frame_type != expected_type) {
-                rp2p_set_error(ctx, "stream: unexpected key confirmation");
-                return -1;
-            }
-            if (!rp2p_stream_unpack_confirm(st, buf, len, expected_type)) {
-                rp2p_set_error(ctx,
-                    "stream: transcript confirmation authentication failed");
-                return -1;
-            }
-            if (st->confirm_received) {
-                if (!st->initiator && rp2p_stream_send_confirm(ctx, fd,
-                    peer_addr, st, RP2P_STREAM_TYPE_CONFIRM_ACK) != 0)
-                    return -1;
-                return 0;
-            }
-            st->confirm_received = 1;
-            st->last_rx_ms = rp2p_now_ms();
-            if (!st->initiator) {
-                if (rp2p_stream_send_confirm(ctx, fd, peer_addr, st,
-                    RP2P_STREAM_TYPE_CONFIRM_ACK) != 0)
-                    return -1;
-            }
-            st->ready = 1;
-            rp2p_stream_log("rp2p: tcp session %s stream ready\n",
-                st->session_hex);
-            return 0;
         }
     }
 
@@ -2587,13 +1754,10 @@ static int rp2p_stream_process_packet(rp2p_t *ctx, rp2p_fd_t fd,
     if (hdr.direction != st->rx_direction) return 0;
 
     if (hdr.payload_len > RP2P_STREAM_MAX_PAYLOAD) return 0;
-    if (len != 44 + RP2P_STREAM_TAG_SZ + (size_t)hdr.payload_len) return 0;
+    if (len != RP2P_STREAM_HEADER_SZ + (size_t)hdr.payload_len) return 0;
     if (hdr.type != RP2P_STREAM_TYPE_DATA && hdr.payload_len != 0) return 0;
 
-    if (!rp2p_stream_decrypt_packet(st, &hdr, buf, plain)) {
-        rp2p_set_error(ctx, "stream: frame authentication failed");
-        return -1;
-    }
+    memcpy(plain, buf + RP2P_STREAM_HEADER_SZ, hdr.payload_len);
 
     st->last_rx_ms = rp2p_now_ms();
     if (hdr.type == RP2P_STREAM_TYPE_RESET) st->reset_received = 1;
@@ -2740,19 +1904,12 @@ static int rp2p_stream_tick(rp2p_t *ctx, rp2p_fd_t fd,
     int burst = 0;
 
     if (!st->enabled) return 0;
-    if (st->initiator && !st->crypto.ready &&
+    if (st->initiator && !st->ready &&
         (!st->hello_sent ||
         now - st->last_hello_ms >= RP2P_STREAM_HELLO_MS))
     {
         return rp2p_stream_send_hello(ctx, fd, peer_addr, st,
             RP2P_STREAM_TYPE_HELLO);
-    }
-    if (st->initiator && st->crypto.ready && !st->ready &&
-        (!st->confirm_sent ||
-        now - st->last_hello_ms >= RP2P_STREAM_HELLO_MS))
-    {
-        return rp2p_stream_send_confirm(ctx, fd, peer_addr, st,
-            RP2P_STREAM_TYPE_CONFIRM);
     }
 
     for (i = 0; i < RP2P_STREAM_SEND_WINDOW && burst < RP2P_STREAM_MAX_BURST; i++) {
@@ -2839,8 +1996,6 @@ static void rp2p_server_session_close(rp2p_udp_server_session_t *sess) {
         sess->tcp_fd = RP2P_FD_INVALID;
     }
     if (sess->is_tcp) rp2p_stream_wipe(&sess->stream);
-    if (!sess->is_tcp) crypto_wipe(&sess->udp_crypto,
-        sizeof(sess->udp_crypto));
     sess->active = 0;
 }
 
@@ -2859,8 +2014,6 @@ static void rp2p_consumer_session_close(rp2p_udp_consumer_session_t *sess) {
         sess->fd = RP2P_FD_INVALID;
     }
     if (sess->is_tcp) rp2p_stream_wipe(&sess->stream);
-    if (!sess->is_tcp) crypto_wipe(&sess->udp_crypto,
-        sizeof(sess->udp_crypto));
     sess->active = 0;
 }
 
@@ -3959,7 +3112,6 @@ const char *rp2p_strerror(int code) {
         case RP2P_EAUTH:    return "authentication failed";
         case RP2P_EVERSION: return "unsupported protocol version";
         case RP2P_EPUNCH:   return "direct connectivity failed";
-        case RP2P_ECRYPTO:  return "cryptographic failure";
         default:              return "unknown error";
     }
 }
@@ -4033,13 +3185,6 @@ void rp2p_options_load_env(rp2p_options_t *opts) {
         opts->pass[RP2P_PASS_MAX] = '\0';
     }
 
-    val = getenv("RP2P_SECRET");
-    if (val) {
-        crypto_wipe(opts->secret, sizeof(opts->secret));
-        strncpy(opts->secret, val, RP2P_SECRET_MAX);
-        opts->secret[RP2P_SECRET_MAX] = '\0';
-    }
-
     val = getenv("RP2P_VIP");
     if (val) {
         size_t len = strlen(val);
@@ -4063,7 +3208,6 @@ void rp2p_options_load_env(rp2p_options_t *opts) {
 void rp2p_options_free(rp2p_options_t *opts) {
     if (!opts) return;
     crypto_wipe(opts->pass, sizeof(opts->pass));
-    crypto_wipe(opts->secret, sizeof(opts->secret));
     if (opts->vip) crypto_wipe(opts->vip, strlen(opts->vip));
     free(opts->vip);
     opts->vip = NULL;
@@ -4187,24 +3331,6 @@ int rp2p_set_pass(rp2p_t *ctx, const char *pass) {
     }
     strncpy(ctx->pass, pass, RP2P_PASS_MAX);
     ctx->pass[RP2P_PASS_MAX] = '\0';
-    rp2p_set_error(ctx, NULL);
-    return RP2P_OK;
-}
-
-/**
- * Stores the shared tunnel authentication secret.
- * @param ctx    Open context.
- * @param secret Shared tunnel secret string.
- * @return 0 on success, -1 on error.
- */
-int rp2p_set_secret(rp2p_t *ctx, const char *secret) {
-    if (!ctx) return RP2P_EINVAL;
-    if (!secret || (secret[0] && !rp2p_is_valid_pass_token(secret))) {
-        rp2p_set_error(ctx, "tunnel secret contains invalid bytes");
-        return RP2P_EINVAL;
-    }
-    strncpy(ctx->secret, secret, RP2P_SECRET_MAX);
-    ctx->secret[RP2P_SECRET_MAX] = '\0';
     rp2p_set_error(ctx, NULL);
     return RP2P_OK;
 }
@@ -5747,28 +4873,28 @@ static int rp2p_punch_wait_response(int udp_fd, const char *session_id,
     const char *from_id, const char *to_id, int wait_ms, uint64_t deadline_ms,
     struct sockaddr_storage *selected_addr, int *malformed, int *mismatched)
 {
-    uint64_t now;
-    int remaining_ms;
-    fd_set readfds;
-    struct timeval tv;
+    uint64_t wait_deadline_ms;
 
-    now = rp2p_now_ms();
-    if (now >= deadline_ms) return RP2P_ETIMEOUT;
-    remaining_ms = (int)(deadline_ms - now);
-    if (remaining_ms > wait_ms) remaining_ms = wait_ms;
-    if (remaining_ms <= 0) return RP2P_ETIMEOUT;
-    FD_ZERO(&readfds);
-    if (!rp2p_fdset_add(udp_fd, &readfds, NULL)) return RP2P_ENET;
-    tv.tv_sec = remaining_ms / 1000;
-    tv.tv_usec = (remaining_ms % 1000) * 1000;
-    if (select(udp_fd + 1, &readfds, NULL, NULL, &tv) <= 0)
-        return RP2P_ETIMEOUT;
-    if (FD_ISSET(udp_fd, &readfds)) {
+    wait_deadline_ms = rp2p_now_ms() + (uint64_t)wait_ms;
+    if (wait_deadline_ms > deadline_ms) wait_deadline_ms = deadline_ms;
+    while (rp2p_now_ms() < wait_deadline_ms) {
         char recv_buf[1024];
         struct sockaddr_storage src_addr;
         socklen_t src_len = sizeof(src_addr);
+        uint64_t now;
+        int remaining_ms;
+        fd_set readfds;
+        struct timeval tv;
         int n;
 
+        now = rp2p_now_ms();
+        remaining_ms = (int)(wait_deadline_ms - now);
+        FD_ZERO(&readfds);
+        if (!rp2p_fdset_add(udp_fd, &readfds, NULL)) return RP2P_ENET;
+        tv.tv_sec = remaining_ms / 1000;
+        tv.tv_usec = (remaining_ms % 1000) * 1000;
+        if (select(udp_fd + 1, &readfds, NULL, NULL, &tv) <= 0)
+            return RP2P_ETIMEOUT;
         n = recvfrom(udp_fd, recv_buf, sizeof(recv_buf) - 1, 0,
             (struct sockaddr *)&src_addr, &src_len);
         if (n > 0) {
@@ -5789,7 +4915,7 @@ static int rp2p_punch_wait_response(int udp_fd, const char *session_id,
             }
             if (!is_ping && !is_pong) {
                 if (malformed) (*malformed)++;
-                return RP2P_ETIMEOUT;
+                continue;
             }
             if (((is_ping && strcmp(rx_from, to_id) == 0 &&
                 strcmp(rx_to, from_id) == 0) ||
@@ -7628,36 +6754,13 @@ int rp2p_wait(
                                     continue;
                                 }
                                 rp2p_stream_init(&sess.stream, 0, sess_id,
-                                    sess_hex, ctx->secret, conn_id, self_id,
+                                    sess_hex, conn_id, self_id,
                                     RP2P_PROTO_TCP);
-                                if (!rp2p_stream_crypto_init(&sess.stream)) {
-                                    rp2p_server_session_close(&sess);
-                                    crypto_wipe(&sess, sizeof(sess));
-                                    continue;
-                                }
                             } else {
                                 sess.backend_fd = rp2p_create_socket(udp_any_host, 0);
                                 if (RP2P_ISERR(sess.backend_fd)) {
                                     crypto_wipe(&sess, sizeof(sess));
                                     continue;
-                                }
-                                if (!rp2p_udp_crypto_init(&sess.udp_crypto,
-                                    ctx->secret, remote_token, conn_id, self_id,
-                                    0))
-                                {
-                                    rp2p_server_session_close(&sess);
-                                    crypto_wipe(&sess, sizeof(sess));
-                                    continue;
-                                }
-                                {
-                                    int negotiate_result = rp2p_udp_negotiate(
-                                        ctx, udp_fd, &sess.peer_addr,
-                                        &sess.udp_crypto, 0);
-                                    if (negotiate_result != RP2P_OK) {
-                                        rp2p_server_session_close(&sess);
-                                        crypto_wipe(&sess, sizeof(sess));
-                                        continue;
-                                    }
                                 }
                             }
                             sess.active = 1;
@@ -7697,7 +6800,7 @@ int rp2p_wait(
             }
 
             if (FD_ISSET(udp_fd, &fds)) {
-                char buf[RP2P_BUF + RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ + 1];
+                char buf[RP2P_BUF + 1];
                 struct sockaddr_storage from;
                 socklen_t fromlen = sizeof(from);
                 int recv_flags = 0;
@@ -7728,17 +6831,14 @@ int rp2p_wait(
                     }
 
                     if (found >= 0) {
-                        if (!sessions[found].is_tcp) {
-                            int negotiation = rp2p_udp_handle_negotiation(ctx,
-                                udp_fd, &sessions[found].peer_addr,
-                                &sessions[found].udp_crypto, 0,
-                                (const unsigned char *)buf, (size_t)n);
-                            if (negotiation < 0)
-                                rp2p_server_session_close(&sessions[found]);
-                            if (negotiation != 0) continue;
+                        if (!sessions[found].is_tcp &&
+                            (size_t)n > RP2P_UDP_PAYLOAD_MAX)
+                        {
+                            rp2p_set_error(ctx,
+                                "UDP datagram exceeds maximum payload size");
+                            continue;
                         }
                         int plain_keepalive = !sessions[found].is_tcp &&
-                            !sessions[found].udp_crypto.enabled &&
                             (size_t)n == strlen(RP2P_CTRTOK_KA) &&
                             memcmp(buf, RP2P_CTRTOK_KA,
                                 strlen(RP2P_CTRTOK_KA)) == 0;
@@ -7769,26 +6869,13 @@ int rp2p_wait(
                                 }
                             } else {
                                 struct sockaddr_in backend_addr;
-                                unsigned char plain[RP2P_BUF];
-                                size_t plain_len;
-                                uint8_t packet_type;
 
-                                if (rp2p_udp_decrypt(ctx,
-                                    &sessions[found].udp_crypto,
-                                    (const unsigned char *)buf, (size_t)n,
-                                    plain, sizeof(plain), &plain_len,
-                                    &packet_type) != RP2P_OK)
-                                    continue;
-                                if (packet_type == RP2P_UDP_TYPE_KEEPALIVE) {
-                                    sessions[found].last_rx = rp2p_now_s();
-                                    continue;
-                                }
                                 memset(&backend_addr, 0, sizeof(backend_addr));
                                 backend_addr.sin_family = AF_INET;
                                 backend_addr.sin_port = htons(ctx->bind_port);
                                 inet_pton(AF_INET, "127.0.0.1", &backend_addr.sin_addr);
                                 sendto(sessions[found].backend_fd,
-                                    (const char *)plain, plain_len, 0,
+                                    (const char *)buf, (size_t)n, 0,
                                     (const struct sockaddr *)&backend_addr, sizeof(backend_addr));
                             }
                             sessions[found].last_rx = rp2p_now_s();
@@ -7827,25 +6914,17 @@ int rp2p_wait(
                     }
                 } else {
                     char buf[RP2P_BUF];
-                    unsigned char packet[RP2P_BUF + RP2P_UDP_HEADER_SZ +
-                        RP2P_UDP_TAG_SZ];
                     struct sockaddr_in bfrom;
                     socklen_t bfromlen = sizeof(bfrom);
                     n = (int)recvfrom(sessions[i].backend_fd, buf, sizeof(buf), 0,
                         (struct sockaddr *)&bfrom, &bfromlen);
                     if (n >= 0) {
-                        size_t packet_len;
                         if (bfrom.sin_family != AF_INET ||
                             bfrom.sin_port != htons(ctx->bind_port) ||
                             ntohl(bfrom.sin_addr.s_addr) != RP2P_IPV4_LOOPBACK)
                             continue;
-                        if (rp2p_udp_encrypt(ctx,
-                            &sessions[i].udp_crypto,
-                            RP2P_UDP_TYPE_DATA, (const unsigned char *)buf,
-                            (size_t)n, packet, sizeof(packet),
-                            &packet_len) == RP2P_OK)
-                            rp2p_sendto_addr(udp_fd, packet, packet_len,
-                                &sessions[i].peer_addr);
+                        rp2p_sendto_addr(udp_fd, buf, (size_t)n,
+                            &sessions[i].peer_addr);
                         sessions[i].last_rx = rp2p_now_s();
                     }
                 }
@@ -7868,20 +6947,7 @@ int rp2p_wait(
                     }
                 }
                 if (rp2p_now_s() - sessions[i].last_ka > RP2P_KEEPALIVE_S) {
-                    if (!sessions[i].is_tcp &&
-                        sessions[i].udp_crypto.enabled)
-                    {
-                        unsigned char packet[RP2P_UDP_HEADER_SZ +
-                            RP2P_UDP_TAG_SZ];
-                        size_t packet_len;
-                        if (rp2p_udp_encrypt(ctx,
-                            &sessions[i].udp_crypto,
-                            RP2P_UDP_TYPE_KEEPALIVE,
-                            (const unsigned char *)"", 0, packet,
-                            sizeof(packet), &packet_len) == RP2P_OK)
-                            rp2p_sendto_addr(udp_fd, packet, packet_len,
-                                &sessions[i].peer_addr);
-                    } else if (!sessions[i].is_tcp) {
+                    if (!sessions[i].is_tcp) {
                         rp2p_sendto_addr(udp_fd, RP2P_CTRTOK_KA,
                             strlen(RP2P_CTRTOK_KA),
                             &sessions[i].peer_addr);
@@ -8381,17 +7447,10 @@ int rp2p_connect(
                             &sess.fd, &sess.peer_addr, &sess) == RP2P_OK)
                         {
                             rp2p_stream_init(&sess.stream, 1, sess_id_bin,
-                                sess_id, ctx->secret, self_id, target_id,
+                                sess_id, self_id, target_id,
                                 RP2P_PROTO_TCP);
                             crypto_wipe(sess_id_bin, sizeof(sess_id_bin));
                             crypto_wipe(sess_id, sizeof(sess_id));
-                            if (!rp2p_stream_crypto_init(&sess.stream)) {
-                                sess.tcp_fd = client_fd;
-                                sess.is_tcp = 1;
-                                rp2p_consumer_session_close(&sess);
-                                crypto_wipe(&sess, sizeof(sess));
-                                continue;
-                            }
                             sess.tcp_fd = client_fd;
                             sess.active = 1;
                             sess.is_tcp = 1;
@@ -8456,6 +7515,11 @@ int rp2p_connect(
             n = (int)recvfrom(local_fd, buf, sizeof(buf), 0,
                 (struct sockaddr *)&from, &fromlen);
             if (n >= 0) {
+                if ((size_t)n > RP2P_UDP_PAYLOAD_MAX) {
+                    rp2p_set_error(ctx,
+                        "UDP datagram exceeds maximum payload size");
+                    continue;
+                }
                 found = -1;
                 for (i = 0; i < n_sessions; i++) {
                     if (!sessions[i].active) continue;
@@ -8529,28 +7593,8 @@ int rp2p_connect(
                             sess.active = 1;
                             sess.is_tcp = 0;
                             sess.tcp_fd = RP2P_FD_INVALID;
-                            if (!rp2p_udp_crypto_init(&sess.udp_crypto,
-                                ctx->secret, sess_id, self_id, target_id, 1))
-                            {
-                                crypto_wipe(sess_random,
-                                    sizeof(sess_random));
-                                crypto_wipe(sess_id, sizeof(sess_id));
-                                rp2p_consumer_session_close(&sess);
-                                crypto_wipe(&sess, sizeof(sess));
-                                goto udp_skip;
-                            }
                             crypto_wipe(sess_random, sizeof(sess_random));
                             crypto_wipe(sess_id, sizeof(sess_id));
-                            {
-                                int negotiate_result = rp2p_udp_negotiate(ctx,
-                                    sess.fd, &sess.peer_addr,
-                                    &sess.udp_crypto, 1);
-                                if (negotiate_result != RP2P_OK) {
-                                    rp2p_consumer_session_close(&sess);
-                                    crypto_wipe(&sess, sizeof(sess));
-                                    goto udp_skip;
-                                }
-                            }
                             found = -1;
                             for (i = 0; i < n_sessions; i++) {
                                 if (!sessions[i].active) {
@@ -8582,16 +7626,8 @@ int rp2p_connect(
                 }
 udp_skip:
                 if (found >= 0) {
-                    unsigned char packet[RP2P_BUF + RP2P_UDP_HEADER_SZ +
-                        RP2P_UDP_TAG_SZ];
-                    size_t packet_len;
-                    if (rp2p_udp_encrypt(ctx,
-                        &sessions[found].udp_crypto,
-                        RP2P_UDP_TYPE_DATA, (const unsigned char *)buf,
-                        (size_t)n, packet, sizeof(packet),
-                        &packet_len) == RP2P_OK)
-                        rp2p_sendto_addr(sessions[found].fd, packet,
-                            packet_len, &sessions[found].peer_addr);
+                    rp2p_sendto_addr(sessions[found].fd, buf,
+                        (size_t)n, &sessions[found].peer_addr);
                     sessions[found].last_rx = rp2p_now_s();
                 }
             }
@@ -8600,26 +7636,23 @@ udp_skip:
         for (i = 0; i < n_sessions; i++) {
             if (!sessions[i].active) continue;
             if (!FD_ISSET(sessions[i].fd, &fds)) continue;
-            char buf[RP2P_BUF + RP2P_UDP_HEADER_SZ + RP2P_UDP_TAG_SZ];
+            char buf[RP2P_BUF];
             struct sockaddr_storage from;
             socklen_t fromlen = sizeof(from);
             n = (int)recvfrom(sessions[i].fd, buf, sizeof(buf), 0,
                 (struct sockaddr *)&from, &fromlen);
             if (n >= 0) {
+                if (!sessions[i].is_tcp &&
+                    (size_t)n > RP2P_UDP_PAYLOAD_MAX)
+                {
+                    rp2p_set_error(ctx,
+                        "UDP datagram exceeds maximum payload size");
+                    continue;
+                }
                 if (!rp2p_sockaddr_equal(&from, &sessions[i].peer_addr))
                     continue;
-                if (!sessions[i].is_tcp) {
-                    int negotiation = rp2p_udp_handle_negotiation(ctx,
-                        sessions[i].fd, &sessions[i].peer_addr,
-                        &sessions[i].udp_crypto, 1,
-                        (const unsigned char *)buf, (size_t)n);
-                    if (negotiation < 0)
-                        rp2p_consumer_session_close(&sessions[i]);
-                    if (negotiation != 0) continue;
-                }
                 {
                     int plain_keepalive = !sessions[i].is_tcp &&
-                        !sessions[i].udp_crypto.enabled &&
                         (size_t)n == strlen(RP2P_CTRTOK_KA) &&
                         memcmp(buf, RP2P_CTRTOK_KA,
                             strlen(RP2P_CTRTOK_KA)) == 0;
@@ -8651,20 +7684,7 @@ udp_skip:
                             rp2p_consumer_session_close(&sessions[i]);
                         }
                     } else {
-                        unsigned char plain[RP2P_BUF];
-                        size_t plain_len;
-                        uint8_t packet_type;
-                        if (rp2p_udp_decrypt(ctx,
-                            &sessions[i].udp_crypto,
-                            (const unsigned char *)buf, (size_t)n, plain,
-                            sizeof(plain), &plain_len,
-                            &packet_type) != RP2P_OK)
-                            continue;
-                        if (packet_type == RP2P_UDP_TYPE_KEEPALIVE) {
-                            sessions[i].last_rx = rp2p_now_s();
-                            continue;
-                        }
-                        rp2p_sendto_addr(local_fd, plain, plain_len,
+                        rp2p_sendto_addr(local_fd, buf, (size_t)n,
                             &sessions[i].client_addr);
                     }
                     sessions[i].last_rx = rp2p_now_s();
@@ -8690,17 +7710,7 @@ udp_skip:
                 }
             }
             if (rp2p_now_s() - sessions[i].last_ka > RP2P_KEEPALIVE_S) {
-                if (!sessions[i].is_tcp && sessions[i].udp_crypto.enabled) {
-                    unsigned char packet[RP2P_UDP_HEADER_SZ +
-                        RP2P_UDP_TAG_SZ];
-                    size_t packet_len;
-                    if (rp2p_udp_encrypt(ctx, &sessions[i].udp_crypto,
-                        RP2P_UDP_TYPE_KEEPALIVE,
-                        (const unsigned char *)"", 0, packet,
-                        sizeof(packet), &packet_len) == RP2P_OK)
-                        rp2p_sendto_addr(sessions[i].fd, packet, packet_len,
-                            &sessions[i].peer_addr);
-                } else if (!sessions[i].is_tcp) {
+                if (!sessions[i].is_tcp) {
                     rp2p_sendto_addr(sessions[i].fd, RP2P_CTRTOK_KA,
                         strlen(RP2P_CTRTOK_KA), &sessions[i].peer_addr);
                 }

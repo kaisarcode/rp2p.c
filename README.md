@@ -1,6 +1,6 @@
 # rp2p.c - RedP2P: Peer-to-peer service tunneling
 
-`rp2p.c` is a small and portable C library and CLI for creating direct peer-to-peer service tunnels. TCP mode uses an encrypted reliable stream, while UDP mode supports optional authenticated encryption through `RP2P_SECRET`. A minimal TCP index handles temporary registration, lookup, candidate exchange, and hole-punch coordination, while application data travels directly between peers over UDP.
+`rp2p.c` is a small and portable C library and CLI for creating direct peer-to-peer service tunnels. TCP mode uses a plaintext reliable stream, while UDP mode forwards plaintext datagrams. A minimal TCP index handles temporary registration, lookup, candidate exchange, and hole-punch coordination, while application data travels directly between peers over UDP.
 
 ## CLI
 
@@ -73,13 +73,6 @@ Publish to a protected index:
 
 ```bash
 RP2P_PASS='password' rp2p set web@idx.example.com:9876 --tcp 8080
-```
-
-Authenticate the direct tunnel on both peers with a separate secret:
-
-```bash
-RP2P_SECRET='tunnel-secret' rp2p set web@idx.example.com:9876 --tcp 8080
-RP2P_SECRET='tunnel-secret' rp2p con web@idx.example.com:9876 --tcp 9000
 ```
 
 Expose that remote TCP service locally on `127.0.0.1:9000`:
@@ -159,7 +152,7 @@ If nobody has announced `game`, then `rp2p con game@idx.example.com:9876` fails 
 The form `game@idx.example.com` is **not** a URL; you cannot open it in a browser, ping it, or connect to it directly.
 It only has meaning inside rp2p commands to refer to a registered host on a specific index.
 
-IDs may contain only ASCII letters and digits (`A-Z`, `a-z`, `0-9`). Password and secret tokens used by `RP2P_PASS`, `RP2P_SECRET`, and `RP2P_VIP` are restricted to terminal-safe bytes: letters, digits, and `._-+=,:@%/`.
+IDs may contain only ASCII letters and digits (`A-Z`, `a-z`, `0-9`). Password tokens used by `RP2P_PASS` and `RP2P_VIP` are restricted to terminal-safe bytes: letters, digits, and `._-+=,:@%/`.
 
 `RP2P_VIP` is parsed as whitespace-separated `<id> <pass>` pairs, so spaces, tabs, newlines, and blank lines are all treated the same after trimming the full string.
 
@@ -168,19 +161,18 @@ IDs may contain only ASCII letters and digits (`A-Z`, `a-z`, `0-9`). Password an
 The index is a **TCP-only control plane**.
 It handles registration, lookup, candidate exchange, and punch signaling.
 It does **not** bind UDP, perform NAT discovery, relay UDP, or carry application payload.
-The index control channel is plaintext, does not authorize consumers, and never needs `RP2P_SECRET`.
+The index control channel is plaintext and does not authorize consumers.
 
 The inter-peer data channel is **UDP-based**.
 By default it tries direct UDP hole punching first.
-In `--tcp` mode, RP2P wraps that UDP path in an internal encrypted reliable stream so local TCP applications still see ordered, reconstructable, full-duplex byte semantics.
-Each TCP client session performs a fresh ephemeral key exchange with the remote peer before application data flows, and those session keys are discarded when the session ends. Without `RP2P_SECRET`, TCP is encrypted but unauthenticated. With the same nonempty `RP2P_SECRET` on both peers, TCP is authenticated and encrypted, and confirmation binds the session to the initiator ID, target publisher ID, transport, roles, session ID, keys, and nonces.
-UDP without `RP2P_SECRET` is plaintext. UDP with the same secret on both peers is authenticated and encrypted. Peers explicitly negotiate this mode before forwarding data, so secure and plaintext peers do not silently interoperate.
+In `--tcp` mode, RP2P wraps that UDP path in an internal plaintext reliable stream so local TCP applications still see ordered, reconstructable, full-duplex byte semantics.
+RP2P does not authenticate peers or encrypt application payloads. Applications must provide authentication, authorization, confidentiality, and integrity when required.
 The `--tcp` and `--udp` flags control how data enters and leaves the tunnel on each end:
 
 | Flag | Publisher side | Consumer side |
 | :--- | :--- | :--- |
-| `--tcp` | Connects to local TCP service → chunks into RP2P encrypted reliable stream frames → sends through UDP hole-punch tunnel | Receives RP2P encrypted reliable stream frames → reconstructs ordered byte stream → writes to local TCP client |
-| `--udp` | Receives from local UDP service → optionally encrypts and authenticates each datagram → sends through hole-punch tunnel | Authenticates, rejects replays, optionally decrypts, and forwards to the local UDP client |
+| `--tcp` | Connects to local TCP service → chunks into RP2P reliable stream frames → sends through UDP hole-punch tunnel | Receives RP2P reliable stream frames → reconstructs ordered byte stream → writes to local TCP client |
+| `--udp` | Receives from local UDP service → sends each datagram through the hole-punch tunnel | Receives each peer datagram and forwards it to the local UDP client |
 
 `rp2p con` creates a local TCP or UDP listener on `127.0.0.1:<listen_port>`. This listener acts as a transparent bridge to the remote service.
 You never connect directly to the remote machine; every connection or datagram goes to `127.0.0.1:<listen_port>`, and rp2p forwards it through
@@ -219,23 +211,6 @@ rp2p_serve_index(ctx, "0.0.0.0", 9876);
 rp2p_close(ctx);
 ```
 
-Configure the same tunnel secret independently on publisher and consumer contexts:
-
-```c
-rp2p_t *publisher;
-rp2p_t *consumer;
-
-rp2p_open(&publisher);
-rp2p_set_secret(publisher, "tunnel-secret");
-rp2p_set_protocol(publisher, RP2P_PROTO_TCP);
-rp2p_set_port(publisher, 8080);
-
-rp2p_open(&consumer);
-rp2p_set_secret(consumer, "tunnel-secret");
-rp2p_set_protocol(consumer, RP2P_PROTO_TCP);
-rp2p_set_port(consumer, 9000);
-```
-
 List publishers currently registered in an index. Publishers are services registered by `rp2p set`; consumers are clients that use `rp2p con` to look up and connect to those services.
 
 ```c
@@ -266,7 +241,6 @@ rp2p_close(ctx);
 - `rp2p_wait()` - registers one host, waits for incoming punch requests, and bridges each session to one local TCP backend or UDP socket.
 - `rp2p_set_pow()` - configures the registration proof difficulty.
 - `rp2p_set_pass()` - configures the shared password used to derive registration proofs.
-- `rp2p_set_secret()` - configures independent peer tunnel authentication and UDP payload encryption.
 - `rp2p_set_port()` - sets the local service or bridge port used by `set`/`con`.
 - `rp2p_set_protocol()` - selects TCP or UDP mode before `rp2p_wait()` or `rp2p_connect()`.
 - `rp2p_set_sweep()` - sets the UDP port sweep range used during punch fallback.
@@ -276,7 +250,7 @@ rp2p_close(ctx);
 ## Wire Protocol
 
 Index control messages are plaintext over TCP. The index does not authenticate or authorize consumers. The inter-peer data channel is UDP-based regardless of the `--tcp`/`--udp` flag.
-UDP is used only between peers for hole-punch probes, keepalives, and direct payload transport. In `--tcp` mode, application bytes are carried inside RP2P's own encrypted reliable stream frames over that UDP path.
+UDP is used only between peers for hole-punch probes, keepalives, and direct payload transport. In `--tcp` mode, application bytes are carried inside RP2P's own plaintext reliable stream frames over that UDP path.
 
 | Request | Response |
 | :--- | :--- |
@@ -296,16 +270,13 @@ UDP is used only between peers for hole-punch probes, keepalives, and direct pay
 In `--tcp` mode only, peers run an internal session protocol over the selected UDP endpoint after hole punching succeeds.
 
 - Each accepted local TCP client gets its own `session_id`.
-- Each session generates a fresh ephemeral keypair on both sides.
-- Peers exchange ephemeral public keys before application data flows.
-- With `RP2P_SECRET`, HELLO frames are authenticated and session keys are bound to the shared secret.
-- Session keys are derived per direction and discarded when the session closes.
-- DATA frames are encrypted and authenticated.
+- Peers exchange plaintext `HELLO` frames before application data flows.
+- DATA and control frames are plaintext.
 - Ordering, retransmission, duplicate suppression, and stream reconstruction happen inside RP2P.
-- `--udp` mode preserves datagram boundaries. With `RP2P_SECRET`, each datagram uses AEAD with directional sequence nonces and a 64-packet replay window. With an empty secret, datagrams remain plaintext.
+- `--udp` mode preserves datagram boundaries and forwards plaintext datagrams.
 - UDP application payloads are limited to `1412` bytes for an IPv6-safe MTU of 1500. Oversized datagrams are rejected without truncation or RP2P fragmentation.
-- Zero-length UDP application datagrams are preserved in plaintext and secure modes.
-- Secure UDP keepalives are authenticated protocol packets. TCP keepalives use authenticated stream `PING` and `PONG` frames.
+- Zero-length UDP application datagrams are preserved.
+- UDP keepalives and TCP stream `PING` and `PONG` frames are plaintext.
 
 Internal TCP stream frame types:
 
@@ -356,7 +327,6 @@ RP2P_PASS='global' RP2P_VIP='web webpass admin adminpass' rp2p idx 9876
 | :--- | :--- |
 | `RP2P_POW=0` | PoW bits for index registration (overridden by `--pow` flag). |
 | `RP2P_PASS=password` | Optional shared password used to protect server registration. |
-| `RP2P_SECRET=secret` | Optional independent publisher/consumer tunnel secret for TCP authentication and UDP AEAD. The index never reads or needs it. |
 | `RP2P_VIP='id pass id pass ...'` | Reserved seat passwords parsed as whitespace-separated `<id> <pass>` pairs. |
 | `RP2P_SWEEP=32` | UDP port sweep range used during punch fallback. |
 | `RP2P_STUN=stun:host:port` | Optional STUN server used to discover `srflx` automatically. |
@@ -401,7 +371,7 @@ rp2p_set_pass(ctx, "password");
 | 28 | 268M | ~50s | ~8min | ~1h |
 | 32 | 4G | ~15min | ~2h | ~24h |
 
-`RP2P_PASS` only controls who may register services in the index. It does not authorize consumers. `RP2P_SECRET` is shared only by publisher and consumer peers; the index never needs it. Neither replaces application-level authorization where the exposed service requires user identities or access policy.
+`RP2P_PASS` only controls who may register services in the index. It does not authorize consumers. Applications must enforce user identities, access policy, and payload security where required.
 
 ## Notes
 
@@ -409,12 +379,12 @@ rp2p_set_pass(ctx, "password");
 - The index does not require a public UDP port.
 - The index does not relay application traffic.
 - The inter-peer transport is UDP-based and stays peer-to-peer.
-- `--tcp` now uses an internal encrypted reliable stream over UDP. Local service still communicates over TCP, but RP2P handles ordering, retransmission, reconstruction, and payload encryption inside the tunnel.
+- `--tcp` uses an internal plaintext reliable stream over UDP. The local service still communicates over TCP, while RP2P handles ordering, retransmission, and reconstruction inside the tunnel.
 - `set --tcp <port>` connects to a real local TCP backend on `127.0.0.1:<port>`.
 - `con --tcp <port>` exposes a local TCP listener on `127.0.0.1:<port>`.
 - Each accepted local TCP client creates a separate peer session.
 - The publisher can serve multiple consumers concurrently.
-- `--udp` mode preserves datagram boundaries and adds authenticated encryption plus replay rejection when `RP2P_SECRET` is set. It does not add ordering or retransmission.
+- `--udp` mode preserves datagram boundaries without adding ordering or retransmission.
 - UDP payloads larger than 1412 bytes are rejected, and zero-length datagrams are supported.
 - `--stun` is opt-in and used only for endpoint discovery. It does not carry application payloads.
 - RP2P does not implement TURN or relay application traffic through the index or other third-party servers.

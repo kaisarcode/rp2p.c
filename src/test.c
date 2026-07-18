@@ -66,7 +66,6 @@ typedef struct {
     unsigned short bind_port;
     int protocol;
     const char *pass;
-    const char *secret;
     _Atomic int result;
     test_thread_t thread;
 } test_publisher_t;
@@ -79,7 +78,6 @@ typedef struct {
     const char *target_id;
     unsigned short bind_port;
     int protocol;
-    const char *secret;
     _Atomic int result;
     test_thread_t thread;
 } test_consumer_t;
@@ -140,21 +138,13 @@ static void test_port_requirement(unsigned int offset, int *tcp, int *udp) {
     } else if (strcmp(test_case_name, "rp2p_connect") == 0) {
         *tcp = offset >= 40U && offset <= 45U;
         if (offset == 47U) *tcp = 1;
-    } else if (strncmp(test_case_name, "rp2p_udp_", 9) == 0) {
+    } else if (strcmp(test_case_name, "rp2p_udp_tunnel") == 0) {
         anchor = 300U;
-        if (strcmp(test_case_name, "rp2p_udp_secure") == 0) anchor += 10U;
-        if (strcmp(test_case_name, "rp2p_udp_secure_publisher") == 0)
-            anchor += 20U;
-        if (strcmp(test_case_name, "rp2p_udp_secure_consumer") == 0)
-            anchor += 30U;
-        if (strcmp(test_case_name, "rp2p_udp_secret_mismatch") == 0)
-            anchor += 40U;
         *tcp = offset == anchor;
         *udp = offset == anchor + 1U || offset == anchor + 2U;
-    } else if (strcmp(test_case_name, "rp2p_tcp_secure") == 0 ||
-        strcmp(test_case_name, "rp2p_tcp_secret_mismatch") == 0)
+    } else if (strcmp(test_case_name, "rp2p_tcp_stream") == 0)
     {
-        anchor = strcmp(test_case_name, "rp2p_tcp_secure") == 0 ? 400U : 410U;
+        anchor = 400U;
         *tcp = offset >= anchor && offset <= anchor + 2U;
     } else if (strcmp(test_case_name, "rp2p_deregister") == 0) {
         *tcp = offset >= 60U && offset <= 62U;
@@ -697,21 +687,6 @@ static int test_socket_interrupted(void) {
 }
 
 /**
- * Reports whether the latest socket operation reached its short timeout.
- * @return 1 when timed out or would block, 0 otherwise.
- */
-static int test_socket_timed_out(void) {
-#ifdef _WIN32
-    int error;
-
-    error = WSAGetLastError();
-    return error == WSAETIMEDOUT || error == WSAEWOULDBLOCK;
-#else
-    return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT;
-#endif
-}
-
-/**
  * Sends an exact byte sequence before the socket timeout expires.
  * @param fd Socket descriptor.
  * @param data Bytes to send.
@@ -1109,8 +1084,6 @@ static DWORD WINAPI test_publisher_main(void *arg) {
     rp2p_set_protocol(publisher->ctx, publisher->protocol);
     rp2p_set_port(publisher->ctx, publisher->bind_port);
     if (publisher->pass != NULL) rp2p_set_pass(publisher->ctx, publisher->pass);
-    if (publisher->secret != NULL)
-        rp2p_set_secret(publisher->ctx, publisher->secret);
     atomic_store(&publisher->result,
         rp2p_wait(publisher->ctx, publisher->host, publisher->index_port,
             publisher->id, publisher->bind_port));
@@ -1128,8 +1101,6 @@ static DWORD WINAPI test_consumer_main(void *arg) {
     consumer = (test_consumer_t *)arg;
     rp2p_set_protocol(consumer->ctx, consumer->protocol);
     rp2p_set_port(consumer->ctx, consumer->bind_port);
-    if (consumer->secret != NULL)
-        rp2p_set_secret(consumer->ctx, consumer->secret);
     atomic_store(&consumer->result,
         rp2p_connect(consumer->ctx, consumer->host, consumer->index_port,
             consumer->self_id, consumer->target_id, consumer->bind_port));
@@ -1191,8 +1162,6 @@ static void *test_publisher_main(void *arg) {
     rp2p_set_protocol(publisher->ctx, publisher->protocol);
     rp2p_set_port(publisher->ctx, publisher->bind_port);
     if (publisher->pass != NULL) rp2p_set_pass(publisher->ctx, publisher->pass);
-    if (publisher->secret != NULL)
-        rp2p_set_secret(publisher->ctx, publisher->secret);
     atomic_store(&publisher->result,
         rp2p_wait(publisher->ctx, publisher->host, publisher->index_port,
             publisher->id, publisher->bind_port));
@@ -1210,8 +1179,6 @@ static void *test_consumer_main(void *arg) {
     consumer = (test_consumer_t *)arg;
     rp2p_set_protocol(consumer->ctx, consumer->protocol);
     rp2p_set_port(consumer->ctx, consumer->bind_port);
-    if (consumer->secret != NULL)
-        rp2p_set_secret(consumer->ctx, consumer->secret);
     atomic_store(&consumer->result,
         rp2p_connect(consumer->ctx, consumer->host, consumer->index_port,
             consumer->self_id, consumer->target_id, consumer->bind_port));
@@ -1442,12 +1409,11 @@ static int test_publisher_wait_result(test_publisher_t *publisher,
 }
 
 /**
- * Starts a UDP publisher with optional tunnel authentication.
+ * Starts a UDP publisher.
  * @return 0 on success, 1 on failure.
  */
 static int test_udp_publisher_start(test_publisher_t *publisher,
-    const char *id, unsigned short index_port, unsigned short bind_port,
-    const char *secret)
+    const char *id, unsigned short index_port, unsigned short bind_port)
 {
     memset(publisher, 0, sizeof(*publisher));
     publisher->host = TEST_HOST;
@@ -1455,7 +1421,6 @@ static int test_udp_publisher_start(test_publisher_t *publisher,
     publisher->id = id;
     publisher->bind_port = bind_port;
     publisher->protocol = RP2P_PROTO_UDP;
-    publisher->secret = secret;
     atomic_init(&publisher->result, 999);
     if (rp2p_open(&publisher->ctx) != RP2P_OK) return 1;
     if (test_thread_start(&publisher->thread, test_publisher_main,
@@ -1465,12 +1430,12 @@ static int test_udp_publisher_start(test_publisher_t *publisher,
 }
 
 /**
- * Starts a UDP consumer with optional tunnel authentication.
+ * Starts a UDP consumer.
  * @return 0 on success, 1 on failure.
  */
 static int test_udp_consumer_start(test_consumer_t *consumer,
     const char *self_id, const char *target_id, unsigned short index_port,
-    unsigned short bind_port, const char *secret)
+    unsigned short bind_port)
 {
     memset(consumer, 0, sizeof(*consumer));
     consumer->host = TEST_HOST;
@@ -1479,7 +1444,6 @@ static int test_udp_consumer_start(test_consumer_t *consumer,
     consumer->target_id = target_id;
     consumer->bind_port = bind_port;
     consumer->protocol = RP2P_PROTO_UDP;
-    consumer->secret = secret;
     atomic_init(&consumer->result, 999);
     if (rp2p_open(&consumer->ctx) != RP2P_OK) return 1;
     if (test_thread_start(&consumer->thread, test_consumer_main,
@@ -1659,12 +1623,11 @@ static int test_control_stub_stop(test_control_stub_t *stub) {
 }
 
 /**
- * Starts one authenticated TCP publisher context.
+ * Starts one TCP publisher context.
  * @return 0 on success, 1 on failure.
  */
 static int test_tcp_publisher_start(test_publisher_t *publisher,
-    const char *id, unsigned short index_port, unsigned short bind_port,
-    const char *secret)
+    const char *id, unsigned short index_port, unsigned short bind_port)
 {
     memset(publisher, 0, sizeof(*publisher));
     publisher->host = TEST_HOST;
@@ -1672,7 +1635,6 @@ static int test_tcp_publisher_start(test_publisher_t *publisher,
     publisher->id = id;
     publisher->bind_port = bind_port;
     publisher->protocol = RP2P_PROTO_TCP;
-    publisher->secret = secret;
     atomic_init(&publisher->result, 999);
     if (rp2p_open(&publisher->ctx) != RP2P_OK) return 1;
     if (test_thread_start(&publisher->thread, test_publisher_main,
@@ -1682,12 +1644,12 @@ static int test_tcp_publisher_start(test_publisher_t *publisher,
 }
 
 /**
- * Starts one authenticated TCP consumer context.
+ * Starts one TCP consumer context.
  * @return 0 on success, 1 on failure.
  */
 static int test_tcp_consumer_start(test_consumer_t *consumer,
     const char *self_id, const char *target_id, unsigned short index_port,
-    unsigned short bind_port, const char *secret)
+    unsigned short bind_port)
 {
     memset(consumer, 0, sizeof(*consumer));
     consumer->host = TEST_HOST;
@@ -1696,7 +1658,6 @@ static int test_tcp_consumer_start(test_consumer_t *consumer,
     consumer->target_id = target_id;
     consumer->bind_port = bind_port;
     consumer->protocol = RP2P_PROTO_TCP;
-    consumer->secret = secret;
     atomic_init(&consumer->result, 999);
     if (rp2p_open(&consumer->ctx) != RP2P_OK) return 1;
     if (test_thread_start(&consumer->thread, test_consumer_main,
@@ -1827,59 +1788,6 @@ static int test_tcp_wait_closed(test_socket_t fd, size_t limit) {
         total += (size_t)n;
     }
     return 1;
-}
-
-/**
- * Verifies prompt authenticated TCP rejection and peer closure.
- * @param port Local TCP adapter port.
- * @param consumer Consumer context state.
- * @param publisher Publisher context state.
- * @return 0 when authentication rejection is observed, 1 otherwise.
- */
-static int test_tcp_auth_rejected(unsigned short port,
-    test_consumer_t *consumer, test_publisher_t *publisher)
-{
-    static const unsigned char payload[] = "authenticated-stream";
-    unsigned char received[64];
-    test_socket_t fd;
-    unsigned int elapsed;
-    int auth_seen;
-    int closed;
-
-    fd = test_tcp_connect(port);
-    if (fd == TEST_SOCKET_INVALID) return 1;
-    test_socket_timeout(fd, 20U);
-    if (test_socket_send_all(fd, payload, sizeof(payload) - 1) != 0) {
-        test_socket_close(fd);
-        return 1;
-    }
-    auth_seen = 0;
-    closed = 0;
-    for (elapsed = 0; elapsed < 1500U; elapsed += 20U) {
-        int n;
-
-        if (strstr(rp2p_get_error(consumer->ctx), "auth") != NULL ||
-            strstr(rp2p_get_error(publisher->ctx), "auth") != NULL)
-            auth_seen = 1;
-        if (!closed) {
-            n = (int)recv(fd, (char *)received, sizeof(received), 0);
-            if (n == 0 || (n < 0 && !test_socket_interrupted() &&
-                !test_socket_timed_out()))
-                closed = 1;
-        } else {
-            test_sleep_ms(20U);
-        }
-        if (auth_seen) break;
-    }
-    test_socket_close(fd);
-    if (!auth_seen) {
-        fprintf(stderr,
-            "TCP auth rejection timed out: closed=%d consumer=%s publisher=%s\n",
-            closed, rp2p_get_error(consumer->ctx),
-            rp2p_get_error(publisher->ctx));
-        return 1;
-    }
-    return 0;
 }
 
 /**
@@ -2093,7 +2001,6 @@ static int case_rp2p_options_default(void) {
     rc += expect_int("default sweep", 20, opts.sweep);
     rc += expect_true("default vip is NULL", opts.vip == NULL);
     rc += expect_true("default pass is empty", opts.pass[0] == '\0');
-    rc += expect_true("default secret is empty", opts.secret[0] == '\0');
     return rc == 0 ? 0 : 1;
 }
 
@@ -2110,7 +2017,6 @@ static int case_rp2p_options_load_env(void) {
     test_setenv("RP2P_SEATS", "7");
     test_setenv("RP2P_POW", "3");
     test_setenv("RP2P_PASS", "secret");
-    test_setenv("RP2P_SECRET", "tunnel-secret");
     test_setenv("RP2P_VIP", "vip vip-pass");
     test_setenv("RP2P_SWEEP", "9");
     test_setenv("RP2P_STUN", "stun:example.com:3478");
@@ -2118,7 +2024,6 @@ static int case_rp2p_options_load_env(void) {
     rc += expect_int("env seats", 7, opts.seats);
     rc += expect_int("env pow", 3, opts.pow);
     rc += expect_string("env pass", "secret", opts.pass);
-    rc += expect_string("env secret", "tunnel-secret", opts.secret);
     rc += expect_string("env vip", "vip vip-pass", opts.vip);
     rc += expect_int("env sweep", 9, opts.sweep);
     rc += expect_string("env stun", "stun:example.com:3478", opts.stun_url);
@@ -2127,7 +2032,6 @@ static int case_rp2p_options_load_env(void) {
     test_setenv("RP2P_SEATS", NULL);
     test_setenv("RP2P_POW", NULL);
     test_setenv("RP2P_PASS", NULL);
-    test_setenv("RP2P_SECRET", NULL);
     test_setenv("RP2P_VIP", NULL);
     test_setenv("RP2P_SWEEP", NULL);
     test_setenv("RP2P_STUN", NULL);
@@ -2281,8 +2185,6 @@ static int case_rp2p_strerror(void) {
         rp2p_strerror(RP2P_EVERSION));
     rc += expect_string("EPUNCH text", "direct connectivity failed",
         rp2p_strerror(RP2P_EPUNCH));
-    rc += expect_string("ECRYPTO text", "cryptographic failure",
-        rp2p_strerror(RP2P_ECRYPTO));
     rc += expect_string("unknown text", "unknown error", rp2p_strerror(999));
     return rc == 0 ? 0 : 1;
 }
@@ -2657,12 +2559,10 @@ static int case_rp2p_connect(void) {
 }
 
 /**
- * Runs one public-API UDP tunnel security and payload regression scenario.
+ * Runs one public-API UDP payload regression scenario.
  * @return 0 on success, 1 on failure.
  */
-static int test_udp_tunnel_case(const char *publisher_secret,
-    const char *consumer_secret, int expect_success, int test_limits,
-    unsigned short port_offset)
+static int test_udp_tunnel_case(void)
 {
     test_index_t index;
     test_publisher_t publisher;
@@ -2674,18 +2574,18 @@ static int test_udp_tunnel_case(const char *publisher_secret,
     int rc;
 
     rc = 0;
-    base = (unsigned short)(test_port_base() + 300U + port_offset);
+    base = (unsigned short)(test_port_base() + 300U);
     memset(payload, 0x5a, sizeof(payload));
     rc += expect_int("start UDP echo", 0,
         test_udp_echo_start(&echo, (unsigned short)(base + 1U)));
     rc += expect_int("start UDP index", 0, test_index_start(&index, base));
     rc += expect_int("start UDP publisher", 0,
         test_udp_publisher_start(&publisher, "udppub", base,
-            (unsigned short)(base + 1U), publisher_secret));
+            (unsigned short)(base + 1U)));
     rc += expect_int("start UDP consumer", 0,
         test_udp_consumer_start(&consumer, "udpclient", "udppub", base,
-            (unsigned short)(base + 2U), consumer_secret));
-    if (rc == 0 && expect_success) {
+            (unsigned short)(base + 2U)));
+    if (rc == 0) {
         int small_result = test_udp_roundtrip(
             (unsigned short)(base + 2U), payload, 3, 3000U);
         rc += expect_int("UDP small datagram", 3, small_result);
@@ -2697,42 +2597,22 @@ static int test_udp_tunnel_case(const char *publisher_secret,
                 rp2p_get_error(publisher.ctx));
         rc += expect_int("UDP empty datagram", 0,
             test_udp_roundtrip((unsigned short)(base + 2U), payload, 0, 3000U));
-        if (test_limits) {
-            rc += expect_int("UDP maximum datagram", RP2P_UDP_PAYLOAD_MAX,
-                test_udp_roundtrip((unsigned short)(base + 2U), payload,
-                    RP2P_UDP_PAYLOAD_MAX, 3000U));
-            rc += expect_int("send UDP oversized datagram", 0,
-                test_udp_send_only((unsigned short)(base + 2U), payload,
-                    RP2P_UDP_PAYLOAD_MAX + 1));
-            for (elapsed = 0; elapsed < 2000U; elapsed += 50U) {
-                if (strstr(rp2p_get_error(consumer.ctx),
-                    "exceeds maximum") != NULL)
-                    break;
-                test_sleep_ms(50U);
-            }
-            rc += expect_true("UDP oversized datagram rejected",
-                rp2p_get_error(consumer.ctx)[0] != '\0');
-            rc += expect_true("UDP oversized detail",
-                strstr(rp2p_get_error(consumer.ctx), "exceeds maximum") != NULL);
-        }
-    } else if (rc == 0) {
-        rc += expect_int("send UDP mismatch probe", 0,
-            test_udp_send_only((unsigned short)(base + 2U), payload, 3));
-        for (elapsed = 0; elapsed < 2000U; elapsed += 100U) {
-            if (rp2p_get_error(consumer.ctx)[0] != '\0' ||
-                rp2p_get_error(publisher.ctx)[0] != '\0')
+        rc += expect_int("UDP maximum datagram", RP2P_UDP_PAYLOAD_MAX,
+            test_udp_roundtrip((unsigned short)(base + 2U), payload,
+                RP2P_UDP_PAYLOAD_MAX, 3000U));
+        rc += expect_int("send UDP oversized datagram", 0,
+            test_udp_send_only((unsigned short)(base + 2U), payload,
+                RP2P_UDP_PAYLOAD_MAX + 1));
+        for (elapsed = 0; elapsed < 2000U; elapsed += 50U) {
+            if (strstr(rp2p_get_error(consumer.ctx),
+                "exceeds maximum") != NULL)
                 break;
-            test_sleep_ms(100U);
-            test_udp_send_only((unsigned short)(base + 2U), payload, 3);
+            test_sleep_ms(50U);
         }
-        rc += expect_true("UDP security mismatch rejected",
-            rp2p_get_error(consumer.ctx)[0] != '\0' ||
-            rp2p_get_error(publisher.ctx)[0] != '\0');
-        rc += expect_true("UDP security mismatch detail",
-            strstr(rp2p_get_error(consumer.ctx), "auth") != NULL ||
-            strstr(rp2p_get_error(consumer.ctx), "security") != NULL ||
-            strstr(rp2p_get_error(publisher.ctx), "auth") != NULL ||
-            strstr(rp2p_get_error(publisher.ctx), "security") != NULL);
+        rc += expect_true("UDP oversized datagram rejected",
+            rp2p_get_error(consumer.ctx)[0] != '\0');
+        rc += expect_true("UDP oversized detail",
+            strstr(rp2p_get_error(consumer.ctx), "exceeds maximum") != NULL);
     }
     test_consumer_stop(&consumer);
     test_publisher_stop(&publisher);
@@ -2742,52 +2622,20 @@ static int test_udp_tunnel_case(const char *publisher_secret,
 }
 
 /**
- * Tests plaintext UDP negotiation, empty datagrams, and MTU enforcement.
+ * Tests plaintext UDP datagrams and MTU enforcement.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_udp_plain(void) {
-    return test_udp_tunnel_case(NULL, NULL, 1, 1, 0);
+static int case_rp2p_udp_tunnel(void) {
+    return test_udp_tunnel_case();
 }
 
 /**
- * Tests authenticated UDP negotiation and encrypted datagrams.
- * @return 0 on success, 1 on failure.
- */
-static int case_rp2p_udp_secure(void) {
-    return test_udp_tunnel_case("secret", "secret", 1, 1, 10);
-}
-
-/**
- * Tests rejection when only the publisher requires UDP security.
- * @return 0 on success, 1 on failure.
- */
-static int case_rp2p_udp_secure_publisher(void) {
-    return test_udp_tunnel_case("secret", NULL, 0, 0, 20);
-}
-
-/**
- * Tests rejection when only the consumer requires UDP security.
- * @return 0 on success, 1 on failure.
- */
-static int case_rp2p_udp_secure_consumer(void) {
-    return test_udp_tunnel_case(NULL, "secret", 0, 0, 30);
-}
-
-/**
- * Tests rejection when UDP peers use different secrets.
- * @return 0 on success, 1 on failure.
- */
-static int case_rp2p_udp_secret_mismatch(void) {
-    return test_udp_tunnel_case("secret", "other", 0, 0, 40);
-}
-
-/**
- * Exercises bounded authenticated TCP stream lifecycle and payload behavior.
+ * Exercises bounded TCP stream lifecycle and payload behavior.
  * @param port Local TCP adapter port.
  * @param echo Running TCP backend stopped by the final close scenario.
  * @return 0 on success, 1 on failure.
  */
-static int test_tcp_secure_coverage(unsigned short port, test_tcp_echo_t *echo) {
+static int test_tcp_stream_coverage(unsigned short port, test_tcp_echo_t *echo) {
     unsigned char first[1537];
     unsigned char second[3073];
     unsigned char concurrent_first[4096];
@@ -2956,84 +2804,46 @@ static int test_tcp_secure_coverage(unsigned short port, test_tcp_echo_t *echo) 
 }
 
 /**
- * Runs one public-API TCP authentication regression scenario.
+ * Runs the public-API TCP stream regression scenario.
  * @return 0 on success, 1 on failure.
  */
-static int test_tcp_tunnel_case(const char *publisher_secret,
-    const char *consumer_secret, int expect_success, int expanded,
-    unsigned short port_offset)
+static int test_tcp_tunnel_case(void)
 {
     test_index_t index;
     test_publisher_t publisher;
     test_consumer_t consumer;
     test_tcp_echo_t echo;
-    unsigned char payload[] = "authenticated-stream";
     unsigned short base;
-    int expanded_ran;
-    int result;
     int rc;
 
     rc = 0;
-    expanded_ran = 0;
-    base = (unsigned short)(test_port_base() + 400U + port_offset);
+    base = (unsigned short)(test_port_base() + 400U);
     rc += expect_int("start TCP echo", 0,
         test_tcp_echo_start(&echo, (unsigned short)(base + 1U)));
     rc += expect_int("start TCP index", 0, test_index_start(&index, base));
     rc += expect_int("start TCP publisher", 0,
         test_tcp_publisher_start(&publisher, "tcppub", base,
-            (unsigned short)(base + 1U), publisher_secret));
+            (unsigned short)(base + 1U)));
     rc += expect_int("start TCP consumer", 0,
         test_tcp_consumer_start(&consumer, "tcpclient", "tcppub", base,
-            (unsigned short)(base + 2U), consumer_secret));
-    result = -1;
-    if (rc == 0 && expect_success && expanded) {
-        expanded_ran = 1;
-        rc += test_tcp_secure_coverage((unsigned short)(base + 2U), &echo);
-    } else if (rc == 0 && expect_success) {
-        result = test_tcp_roundtrip((unsigned short)(base + 2U), payload,
-            sizeof(payload) - 1);
-    } else if (rc == 0) {
-        result = test_tcp_auth_rejected((unsigned short)(base + 2U),
-            &consumer, &publisher);
+            (unsigned short)(base + 2U)));
+    if (rc == 0) {
+        rc += test_tcp_stream_coverage((unsigned short)(base + 2U), &echo);
+    } else {
+        test_tcp_echo_stop(&echo);
     }
-    if (expect_success && !expanded) {
-        rc += expect_int("TCP authenticated roundtrip",
-            (int)sizeof(payload) - 1, result);
-    } else if (!expect_success) {
-        rc += expect_int("TCP secret mismatch rejected", 0, result);
-        rp2p_stop(consumer.ctx);
-        rp2p_stop(publisher.ctx);
-        test_thread_join(consumer.thread);
-        test_thread_join(publisher.thread);
-        rc += expect_true("TCP secret mismatch detail",
-            strstr(rp2p_get_error(consumer.ctx), "auth") != NULL ||
-            strstr(rp2p_get_error(publisher.ctx), "auth") != NULL);
-        rp2p_close(consumer.ctx);
-        rp2p_close(publisher.ctx);
-        consumer.ctx = NULL;
-        publisher.ctx = NULL;
-    }
-    if (consumer.ctx != NULL) test_consumer_stop(&consumer);
-    if (publisher.ctx != NULL) test_publisher_stop(&publisher);
+    test_consumer_stop(&consumer);
+    test_publisher_stop(&publisher);
     test_index_stop(&index);
-    if (!expanded_ran) test_tcp_echo_stop(&echo);
     return rc == 0 ? 0 : 1;
 }
 
 /**
- * Tests authenticated TCP transcript confirmation through the public API.
+ * Tests TCP stream through the public API.
  * @return 0 on success, 1 on failure.
  */
-static int case_rp2p_tcp_secure(void) {
-    return test_tcp_tunnel_case("secret", "secret", 1, 1, 0);
-}
-
-/**
- * Tests TCP rejection when peer tunnel secrets differ.
- * @return 0 on success, 1 on failure.
- */
-static int case_rp2p_tcp_secret_mismatch(void) {
-    return test_tcp_tunnel_case("secret", "other", 0, 0, 10);
+static int case_rp2p_tcp_stream(void) {
+    return test_tcp_tunnel_case();
 }
 
 /**
@@ -3569,29 +3379,6 @@ static int case_rp2p_set_pass(void) {
 }
 
 /**
- * Tests rp2p_set_secret.
- * @return 0 on success, 1 on failure.
- */
-static int case_rp2p_set_secret(void) {
-    rp2p_t *ctx;
-    int rc;
-
-    rc = 0;
-    rc += expect_int("set secret NULL ctx", RP2P_EINVAL,
-        rp2p_set_secret(NULL, "x"));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_int("set secret", RP2P_OK,
-        rp2p_set_secret(ctx, "secret"));
-    rc += expect_int("clear secret", RP2P_OK, rp2p_set_secret(ctx, ""));
-    rc += expect_int("set NULL secret", RP2P_EINVAL,
-        rp2p_set_secret(ctx, NULL));
-    rc += expect_int("set unsafe secret", RP2P_EINVAL,
-        rp2p_set_secret(ctx, "bad`secret"));
-    rp2p_close(ctx);
-    return rc == 0 ? 0 : 1;
-}
-
-/**
  * Tests rp2p_set_vip.
  * @return 0 on success, 1 on failure.
  */
@@ -3679,17 +3466,8 @@ static int run_case(const char *name) {
     if (strcmp(name, "rp2p_serve_index") == 0) return case_rp2p_serve_index();
     if (strcmp(name, "rp2p_wait") == 0) return case_rp2p_wait();
     if (strcmp(name, "rp2p_connect") == 0) return case_rp2p_connect();
-    if (strcmp(name, "rp2p_udp_plain") == 0) return case_rp2p_udp_plain();
-    if (strcmp(name, "rp2p_udp_secure") == 0) return case_rp2p_udp_secure();
-    if (strcmp(name, "rp2p_udp_secure_publisher") == 0)
-        return case_rp2p_udp_secure_publisher();
-    if (strcmp(name, "rp2p_udp_secure_consumer") == 0)
-        return case_rp2p_udp_secure_consumer();
-    if (strcmp(name, "rp2p_udp_secret_mismatch") == 0)
-        return case_rp2p_udp_secret_mismatch();
-    if (strcmp(name, "rp2p_tcp_secure") == 0) return case_rp2p_tcp_secure();
-    if (strcmp(name, "rp2p_tcp_secret_mismatch") == 0)
-        return case_rp2p_tcp_secret_mismatch();
+    if (strcmp(name, "rp2p_udp_tunnel") == 0) return case_rp2p_udp_tunnel();
+    if (strcmp(name, "rp2p_tcp_stream") == 0) return case_rp2p_tcp_stream();
     if (strcmp(name, "rp2p_deregister") == 0) return case_rp2p_deregister();
     if (strcmp(name, "rp2p_list_publishers") == 0) return case_rp2p_list_publishers();
     if (strcmp(name, "rp2p_on_signal") == 0) return case_rp2p_on_signal();
@@ -3703,7 +3481,6 @@ static int run_case(const char *name) {
     if (strcmp(name, "rp2p_set_port") == 0) return case_rp2p_set_port();
     if (strcmp(name, "rp2p_set_protocol") == 0) return case_rp2p_set_protocol();
     if (strcmp(name, "rp2p_set_pass") == 0) return case_rp2p_set_pass();
-    if (strcmp(name, "rp2p_set_secret") == 0) return case_rp2p_set_secret();
     if (strcmp(name, "rp2p_set_vip") == 0) return case_rp2p_set_vip();
     if (strcmp(name, "rp2p_set_sweep") == 0) return case_rp2p_set_sweep();
     if (strcmp(name, "rp2p_set_stun_url") == 0) return case_rp2p_set_stun_url();

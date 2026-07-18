@@ -31,7 +31,6 @@ typedef struct rp2p rp2p_t;
 #define RP2P_EAUTH      -8
 #define RP2P_EVERSION   -9
 #define RP2P_EPUNCH    -10
-#define RP2P_ECRYPTO   -11
 
 #define RP2P_MAX_PEERS     1024
 #define RP2P_ID_MAX         63
@@ -42,7 +41,6 @@ typedef struct rp2p rp2p_t;
 #define RP2P_KEY_SZ          16
 #define RP2P_KEY_STR_SZ      33
 #define RP2P_PASS_MAX       255
-#define RP2P_SECRET_MAX     255
 #define RP2P_UDP_PAYLOAD_MAX 1412
 
 #define RP2P_PROTO_TCP 1
@@ -58,7 +56,6 @@ typedef struct rp2p_options {
     int seats;
     int pow;
     char pass[RP2P_PASS_MAX + 1];
-    char secret[RP2P_SECRET_MAX + 1];
     char *vip;
     int sweep;
     char stun_url[256];
@@ -185,7 +182,7 @@ const char *rp2p_get_error(rp2p_t *ctx);
 int rp2p_is_valid_id(const char *id);
 
 /**
- * Validates one terminal-safe password or secret token.
+ * Validates one terminal-safe password token.
  * @param pass Token to validate.
  * @return 1 when valid, 0 otherwise.
  */
@@ -223,7 +220,7 @@ unsigned short bind_port
  * CLIENT: Expose a remote service on a local port.
  * Uses TCP for LOOKUP + PUNCH_REQ2 to the index. For TCP stream forwarding
  * over direct UDP, creates a local TCP listener and uses a direct peer UDP
- * path for the encrypted reliable stream. For UDP datagram forwarding, creates
+ * path for the reliable stream. For UDP datagram forwarding, creates
  * a UDP socket and hole-punches directly to the publisher.
  * @return RP2P_OK on clean exit, or a negative error code.
  */
@@ -330,12 +327,6 @@ int rp2p_set_protocol(rp2p_t *ctx, int proto);
  * @return RP2P_OK or RP2P_EINVAL.
  */
 int rp2p_set_pass(rp2p_t *ctx, const char *pass);
-
-/**
- * Sets the publisher or consumer tunnel secret, never an index secret.
- * @return RP2P_OK or RP2P_EINVAL.
- */
-int rp2p_set_secret(rp2p_t *ctx, const char *secret);
 
 /**
  * Sets reserved publisher IDs and registration passwords.

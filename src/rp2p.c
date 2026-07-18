@@ -231,7 +231,6 @@ static void print_help(const char *name) {
     printf("Environment:\n");
     printf("  RP2P_POW                PoW bits for index registration (0..32)\n");
     printf("  RP2P_PASS               Optional shared password for REGISTER/set protection\n");
-    printf("  RP2P_SECRET             Optional tunnel authentication and encryption secret\n");
     printf("  RP2P_VIP                Reserved seat passwords as '<id> <pass> ...'\n");
     printf("  RP2P_SWEEP              UDP port sweep range used during punch fallback\n");
     printf("  RP2P_STUN               Optional STUN URL (stun:host:port)\n");
@@ -411,12 +410,6 @@ int main(int argc, char **argv) {
             rp2p_options_free(&opts);
             return 1;
         }
-        if (rp2p_set_secret(ctx, opts.secret) != RP2P_OK) {
-            fprintf(stderr, "rp2p: invalid RP2P_SECRET characters\n");
-            rp2p_close(ctx);
-            rp2p_options_free(&opts);
-            return 1;
-        }
         rp2p_set_protocol(ctx, proto);
         rp2p_set_port(ctx, service_port);
         rp2p_set_sweep(ctx, opts.sweep);
@@ -526,12 +519,6 @@ int main(int argc, char **argv) {
         snprintf(self_id, sizeof(self_id), "c%d", (int)getpid());
 
         if (rp2p_open(&ctx) != RP2P_OK) { fprintf(stderr, "rp2p: failed to create context\n"); rp2p_options_free(&opts); return 1; }
-        if (rp2p_set_secret(ctx, opts.secret) != RP2P_OK) {
-            fprintf(stderr, "rp2p: invalid RP2P_SECRET characters\n");
-            rp2p_close(ctx);
-            rp2p_options_free(&opts);
-            return 1;
-        }
         rp2p_set_protocol(ctx, proto);
         rp2p_set_port(ctx, listen_port);
         rp2p_set_sweep(ctx, opts.sweep);

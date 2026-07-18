@@ -143,7 +143,6 @@ static int rp2p_parse_env(const char *text, long min, long max, long *out) {
 #define RP2P_STREAM_MAX_WAIT_SEND     128
 #define RP2P_STREAM_HELLO_MS          500
 #define RP2P_STREAM_CLOSE_MS          500
-#define RP2P_STREAM_IDLE_MS           20000
 #define RP2P_LINK_MTU                 1500
 #define RP2P_IPV4_UDP_OVERHEAD        (20 + 8)
 #define RP2P_IPV6_UDP_OVERHEAD        (40 + 8)
@@ -268,7 +267,6 @@ typedef struct {
     uint8_t transport_protocol;
     ikcpcb *kcp;
     rp2p_stream_adapter_t *adapter;
-    uint64_t last_rx_ms;
     uint64_t last_tx_ms;
     uint64_t last_hello_ms;
     uint64_t last_close_ms;
@@ -1236,7 +1234,6 @@ static int rp2p_stream_init(rp2p_t *ctx, rp2p_stream_state_t *st,
     if (session_hex) memcpy(st->session_hex, session_hex,
         RP2P_STREAM_SESSION_ID_SZ * 2 + 1);
     now = rp2p_now_ms();
-    st->last_rx_ms = now;
     st->last_tx_ms = now;
     st->last_keepalive_ms = now;
     st->next_update_ms = (uint32_t)now;
@@ -1278,11 +1275,7 @@ static int rp2p_stream_send_control(rp2p_t *ctx, rp2p_stream_state_t *st,
  * Notifies an established peer of terminal stream failure once.
  * @return None.
  */
-static void rp2p_stream_fail(rp2p_t *ctx, rp2p_fd_t fd,
-    const struct sockaddr_storage *peer_addr, rp2p_stream_state_t *st)
-{
-    (void)fd;
-    (void)peer_addr;
+static void rp2p_stream_fail(rp2p_t *ctx, rp2p_stream_state_t *st) {
     if (!st || !st->ready || st->reset_sent || st->reset_received) return;
     st->reset_sent = 1;
     rp2p_stream_send_control(ctx, st, RP2P_STREAM_TYPE_RESET);
@@ -1324,8 +1317,7 @@ static int rp2p_stream_drain(rp2p_t *ctx, rp2p_stream_state_t *st,
  * Dispatches one validated session datagram through handshake or KCP.
  * @return 0 on success, -1 on protocol, transport, or local socket failure.
  */
-static int rp2p_stream_process_packet(rp2p_t *ctx, rp2p_fd_t fd,
-    const struct sockaddr_storage *peer_addr,
+static int rp2p_stream_process_packet(rp2p_t *ctx,
     rp2p_stream_state_t *st, rp2p_fd_t tcp_fd,
     const unsigned char *buf, size_t len)
 {
@@ -1333,8 +1325,6 @@ static int rp2p_stream_process_packet(rp2p_t *ctx, rp2p_fd_t fd,
     uint8_t expected_role;
     int input_result;
 
-    (void)fd;
-    (void)peer_addr;
     if (!rp2p_stream_unpack(buf, len, &envelope)) return 0;
     expected_role = st->initiator ? RP2P_STREAM_ROLE_RESPONDER :
         RP2P_STREAM_ROLE_INITIATOR;
@@ -1343,7 +1333,6 @@ static int rp2p_stream_process_packet(rp2p_t *ctx, rp2p_fd_t fd,
         memcmp(envelope.session_id, st->session_id,
             RP2P_STREAM_SESSION_ID_SZ) != 0)
         return 0;
-    st->last_rx_ms = rp2p_now_ms();
     if (envelope.type == RP2P_STREAM_TYPE_HELLO && !st->initiator) {
         if (rp2p_stream_send_control(ctx, st,
             RP2P_STREAM_TYPE_HELLO_ACK) != 0)
@@ -1393,16 +1382,13 @@ static int rp2p_stream_process_packet(rp2p_t *ctx, rp2p_fd_t fd,
  * Reads one local TCP chunk and queues its bytes in KCP stream mode.
  * @return 0 on success, -1 on local socket or KCP failure.
  */
-static int rp2p_stream_pump_tcp(rp2p_t *ctx, rp2p_fd_t fd,
-    const struct sockaddr_storage *peer_addr,
+static int rp2p_stream_pump_tcp(rp2p_t *ctx,
     rp2p_stream_state_t *st, rp2p_fd_t tcp_fd)
 {
     unsigned char buf[RP2P_BUF];
     int n;
     int sent;
 
-    (void)fd;
-    (void)peer_addr;
     if (!rp2p_stream_can_send_data(st)) return 0;
     n = rp2p_sock_read(tcp_fd, (char *)buf, (int)sizeof(buf));
     if (n < 0) {
@@ -1425,17 +1411,13 @@ static int rp2p_stream_pump_tcp(rp2p_t *ctx, rp2p_fd_t fd,
 
 /**
  * Advances one KCP session and RP2P tunnel lifecycle when due.
- * @return 0 on success, -1 on timeout or transport failure.
+ * @return 0 on success, -1 on transport failure.
  */
-static int rp2p_stream_tick(rp2p_t *ctx, rp2p_fd_t fd,
-    const struct sockaddr_storage *peer_addr,
-    rp2p_stream_state_t *st)
+static int rp2p_stream_tick(rp2p_t *ctx, rp2p_stream_state_t *st)
 {
     uint64_t now;
     uint32_t current;
 
-    (void)fd;
-    (void)peer_addr;
     if (!st->enabled) return 0;
     now = rp2p_now_ms();
     current = (uint32_t)now;
@@ -1472,10 +1454,6 @@ static int rp2p_stream_tick(rp2p_t *ctx, rp2p_fd_t fd,
             RP2P_STREAM_TYPE_KEEPALIVE) != 0)
             return -1;
         st->last_keepalive_ms = now;
-    }
-    if (st->ready && now - st->last_rx_ms >= RP2P_STREAM_IDLE_MS) {
-        rp2p_set_error(ctx, "stream: peer idle timeout");
-        return -1;
     }
     return 0;
 }
@@ -6616,8 +6594,7 @@ rp2p_publisher_runtime_t *runtime)
         if (runtime->owned_sessions[i].is_tcp &&
             !rp2p_stream_is_done(&runtime->owned_sessions[i].stream))
         {
-            rp2p_stream_fail(runtime->borrowed_ctx, runtime->owned_udp_fd,
-                &runtime->owned_sessions[i].peer_addr,
+            rp2p_stream_fail(runtime->borrowed_ctx,
                 &runtime->owned_sessions[i].stream);
         }
         rp2p_server_session_close(&runtime->owned_sessions[i]);
@@ -6872,9 +6849,7 @@ int *max_fd)
         rp2p_set_error(ctx,
             "wait: backend descriptor cannot be represented by fd_set");
         if (runtime->owned_sessions[i].is_tcp)
-            rp2p_stream_fail(ctx, runtime->owned_udp_fd,
-                &runtime->owned_sessions[i].peer_addr,
-                &runtime->owned_sessions[i].stream);
+            rp2p_stream_fail(ctx, &runtime->owned_sessions[i].stream);
         rp2p_server_session_close(&runtime->owned_sessions[i]);
         failed = 1;
     }
@@ -7029,13 +7004,11 @@ const fd_set *read_fds)
     if (punch_control) return 1;
     if (session->is_tcp) {
         if (session->backend_fd != RP2P_FD_INVALID &&
-            rp2p_stream_process_packet(runtime->borrowed_ctx,
-                runtime->owned_udp_fd, &session->peer_addr, &session->stream,
+            rp2p_stream_process_packet(runtime->borrowed_ctx, &session->stream,
                 session->backend_fd, (const unsigned char *)buf,
                 (size_t)n) != 0)
         {
-            rp2p_stream_fail(runtime->borrowed_ctx, runtime->owned_udp_fd,
-                &session->peer_addr, &session->stream);
+            rp2p_stream_fail(runtime->borrowed_ctx, &session->stream);
             rp2p_server_session_close(session);
         }
     } else {
@@ -7073,14 +7046,10 @@ const fd_set *read_fds)
             continue;
         if (runtime->owned_sessions[i].is_tcp) {
             if (rp2p_stream_pump_tcp(runtime->borrowed_ctx,
-                runtime->owned_udp_fd,
-                &runtime->owned_sessions[i].peer_addr,
                 &runtime->owned_sessions[i].stream,
                 runtime->owned_sessions[i].backend_fd) != 0)
             {
                 rp2p_stream_fail(runtime->borrowed_ctx,
-                    runtime->owned_udp_fd,
-                    &runtime->owned_sessions[i].peer_addr,
                     &runtime->owned_sessions[i].stream);
                 rp2p_server_session_close(&runtime->owned_sessions[i]);
             }
@@ -7115,13 +7084,9 @@ rp2p_publisher_runtime_t *runtime)
         if (!runtime->owned_sessions[i].active) continue;
         if (runtime->owned_sessions[i].is_tcp) {
             if (rp2p_stream_tick(runtime->borrowed_ctx,
-                runtime->owned_udp_fd,
-                &runtime->owned_sessions[i].peer_addr,
                 &runtime->owned_sessions[i].stream) != 0)
             {
                 rp2p_stream_fail(runtime->borrowed_ctx,
-                    runtime->owned_udp_fd,
-                    &runtime->owned_sessions[i].peer_addr,
                     &runtime->owned_sessions[i].stream);
                 rp2p_server_session_close(&runtime->owned_sessions[i]);
                 continue;
@@ -7561,9 +7526,7 @@ rp2p_consumer_runtime_t *runtime)
         if (runtime->sessions[i].is_tcp &&
             !rp2p_stream_is_done(&runtime->sessions[i].stream))
         {
-            rp2p_stream_fail(runtime->ctx, runtime->sessions[i].fd,
-                &runtime->sessions[i].peer_addr,
-                &runtime->sessions[i].stream);
+            rp2p_stream_fail(runtime->ctx, &runtime->sessions[i].stream);
         }
         rp2p_consumer_session_close(&runtime->sessions[i]);
     }
@@ -7918,9 +7881,7 @@ int *maxfd)
             rp2p_set_error(runtime->ctx,
                 "connect: peer descriptor cannot be represented by fd_set");
             if (runtime->sessions[i].is_tcp) {
-                rp2p_stream_fail(runtime->ctx, runtime->sessions[i].fd,
-                    &runtime->sessions[i].peer_addr,
-                    &runtime->sessions[i].stream);
+                rp2p_stream_fail(runtime->ctx, &runtime->sessions[i].stream);
             }
             rp2p_consumer_session_close(&runtime->sessions[i]);
             failed = 1;
@@ -7933,9 +7894,7 @@ int *maxfd)
         if (!rp2p_fdset_add(runtime->sessions[i].tcp_fd, fds, maxfd)) {
             rp2p_set_error(runtime->ctx,
                 "connect: client descriptor cannot be represented by fd_set");
-            rp2p_stream_fail(runtime->ctx, runtime->sessions[i].fd,
-                &runtime->sessions[i].peer_addr,
-                &runtime->sessions[i].stream);
+            rp2p_stream_fail(runtime->ctx, &runtime->sessions[i].stream);
             rp2p_consumer_session_close(&runtime->sessions[i]);
             failed = 1;
         }
@@ -8053,13 +8012,10 @@ const fd_set *fds)
     for (i = 0; i < runtime->n_sessions; i++) {
         if (!runtime->sessions[i].active) continue;
         if (!FD_ISSET(runtime->sessions[i].tcp_fd, fds)) continue;
-        if (rp2p_stream_pump_tcp(runtime->ctx, runtime->sessions[i].fd,
-            &runtime->sessions[i].peer_addr, &runtime->sessions[i].stream,
-            runtime->sessions[i].tcp_fd) != 0)
+        if (rp2p_stream_pump_tcp(runtime->ctx,
+            &runtime->sessions[i].stream, runtime->sessions[i].tcp_fd) != 0)
         {
-            rp2p_stream_fail(runtime->ctx, runtime->sessions[i].fd,
-                &runtime->sessions[i].peer_addr,
-                &runtime->sessions[i].stream);
+            rp2p_stream_fail(runtime->ctx, &runtime->sessions[i].stream);
             rp2p_consumer_session_close(&runtime->sessions[i]);
         }
     }
@@ -8120,14 +8076,11 @@ const fd_set *fds)
             if (runtime->sessions[i].is_tcp) {
                 if (runtime->sessions[i].tcp_fd != RP2P_FD_INVALID &&
                     rp2p_stream_process_packet(runtime->ctx,
-                        runtime->sessions[i].fd,
-                        &runtime->sessions[i].peer_addr,
                         &runtime->sessions[i].stream,
                         runtime->sessions[i].tcp_fd,
                         (const unsigned char *)buf, (size_t)n) != 0)
                 {
-                    rp2p_stream_fail(runtime->ctx, runtime->sessions[i].fd,
-                        &runtime->sessions[i].peer_addr,
+                    rp2p_stream_fail(runtime->ctx,
                         &runtime->sessions[i].stream);
                     rp2p_consumer_session_close(&runtime->sessions[i]);
                 }
@@ -8153,12 +8106,10 @@ rp2p_consumer_runtime_t *runtime)
     for (i = 0; i < runtime->n_sessions; i++) {
         if (!runtime->sessions[i].active) continue;
         if (runtime->sessions[i].is_tcp) {
-            if (rp2p_stream_tick(runtime->ctx, runtime->sessions[i].fd,
-                &runtime->sessions[i].peer_addr,
+            if (rp2p_stream_tick(runtime->ctx,
                 &runtime->sessions[i].stream) != 0)
             {
-                rp2p_stream_fail(runtime->ctx, runtime->sessions[i].fd,
-                    &runtime->sessions[i].peer_addr,
+                rp2p_stream_fail(runtime->ctx,
                     &runtime->sessions[i].stream);
                 rp2p_consumer_session_close(&runtime->sessions[i]);
                 continue;

@@ -35,6 +35,8 @@
 #endif
 
 #define TEST_HOST "127.0.0.1"
+#define TEST_TCP_CLIENTS 4
+#define TEST_TCP_LARGE_SIZE (80U * 1024U + 333U)
 
 #ifdef _WIN32
 typedef HANDLE test_thread_t;
@@ -51,7 +53,7 @@ typedef socklen_t test_socklen_t;
 typedef struct {
     rp2p_t *ctx;
     unsigned short port;
-    int result;
+    volatile int result;
     test_thread_t thread;
 } test_index_t;
 
@@ -64,7 +66,7 @@ typedef struct {
     int protocol;
     const char *pass;
     const char *secret;
-    int result;
+    volatile int result;
     test_thread_t thread;
 } test_publisher_t;
 
@@ -77,7 +79,7 @@ typedef struct {
     unsigned short bind_port;
     int protocol;
     const char *secret;
-    int result;
+    volatile int result;
     test_thread_t thread;
 } test_consumer_t;
 
@@ -90,10 +92,17 @@ typedef struct {
 
 typedef struct {
     test_socket_t fd;
+    test_socket_t clients[TEST_TCP_CLIENTS];
     unsigned short port;
     volatile int stop;
     test_thread_t thread;
 } test_tcp_echo_t;
+
+typedef struct {
+    test_socket_t fd;
+    unsigned short port;
+    test_thread_t thread;
+} test_control_stub_t;
 
 typedef struct {
     char ids[8][RP2P_ID_MAX + 1];
@@ -103,25 +112,199 @@ typedef struct {
 static int signal_count;
 static rp2p_t *signal_ctx;
 static char test_home_path[512];
+static char test_port_reservation[512];
+static const char *test_case_name;
+
+static int test_socket_close(test_socket_t fd);
+static test_socket_t test_control_connect(unsigned short port);
+static int test_control_request(unsigned short port,
+    const unsigned char *request, size_t request_len, const char *expected);
 
 /**
- * Returns the current process id as an unsigned long.
- * @return Process id value.
+ * Reports which socket protocols one test case uses at a port offset.
+ * @param offset Port offset from the allocated base.
+ * @param tcp Set to 1 when the TCP port is required.
+ * @param udp Set to 1 when the UDP port is required.
+ * @return None.
  */
-static unsigned long test_pid(void) {
-#ifdef _WIN32
-    return (unsigned long)_getpid();
-#else
-    return (unsigned long)getpid();
-#endif
+static void test_port_requirement(unsigned int offset, int *tcp, int *udp) {
+    unsigned int anchor;
+
+    *tcp = 0;
+    *udp = 0;
+    if (strcmp(test_case_name, "rp2p_serve_index") == 0) {
+        *tcp = offset >= 1U && offset <= 3U;
+    } else if (strcmp(test_case_name, "rp2p_wait") == 0) {
+        *tcp = offset == 20U || offset == 22U;
+    } else if (strcmp(test_case_name, "rp2p_connect") == 0) {
+        *tcp = offset >= 40U && offset <= 45U;
+        if (offset == 47U) *tcp = 1;
+    } else if (strncmp(test_case_name, "rp2p_udp_", 9) == 0) {
+        anchor = 300U;
+        if (strcmp(test_case_name, "rp2p_udp_secure") == 0) anchor += 10U;
+        if (strcmp(test_case_name, "rp2p_udp_secure_publisher") == 0)
+            anchor += 20U;
+        if (strcmp(test_case_name, "rp2p_udp_secure_consumer") == 0)
+            anchor += 30U;
+        if (strcmp(test_case_name, "rp2p_udp_secret_mismatch") == 0)
+            anchor += 40U;
+        *tcp = offset == anchor;
+        *udp = offset == anchor + 1U || offset == anchor + 2U;
+    } else if (strcmp(test_case_name, "rp2p_tcp_secure") == 0 ||
+        strcmp(test_case_name, "rp2p_tcp_secret_mismatch") == 0)
+    {
+        anchor = strcmp(test_case_name, "rp2p_tcp_secure") == 0 ? 400U : 410U;
+        *tcp = offset >= anchor && offset <= anchor + 2U;
+    } else if (strcmp(test_case_name, "rp2p_deregister") == 0) {
+        *tcp = offset >= 60U && offset <= 62U;
+    } else if (strcmp(test_case_name, "rp2p_list_publishers") == 0) {
+        *tcp = offset >= 80U && offset <= 84U;
+    }
 }
 
 /**
- * Returns a loopback port base for this process.
- * @return TCP port base.
+ * Reports whether one required loopback port can be bound.
+ * @param base First port in the candidate block.
+ * @param offset Port offset from the candidate base.
+ * @param type Socket type.
+ * @return 1 when the required port can be bound, 0 otherwise.
+ */
+static int test_port_available(unsigned short base, unsigned int offset,
+    int type)
+{
+    struct sockaddr_in addr;
+    test_socket_t fd;
+    int result;
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons((unsigned short)(base + offset));
+    fd = socket(AF_INET, type, 0);
+    if (fd == TEST_SOCKET_INVALID) return 0;
+    result = bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) == 0;
+#ifdef _WIN32
+    closesocket(fd);
+#else
+    close(fd);
+#endif
+    return result;
+}
+
+/**
+ * Reports whether every port required by the active case is available.
+ * @param base Candidate port base.
+ * @return 1 when all required ports are available, 0 otherwise.
+ */
+static int test_port_base_available(unsigned short base) {
+    unsigned int offset;
+
+    for (offset = 0; offset <= 412U; offset++) {
+        int tcp;
+        int udp;
+
+        test_port_requirement(offset, &tcp, &udp);
+        if (tcp && !test_port_available(base, offset, SOCK_STREAM)) return 0;
+        if (udp && !test_port_available(base, offset, SOCK_DGRAM)) return 0;
+    }
+    return 1;
+}
+
+/**
+ * Reserves one candidate port block against other test processes.
+ * @param base Candidate port base.
+ * @return 1 when reserved, 0 when already reserved or unavailable.
+ */
+static int test_port_base_reserve(unsigned short base) {
+    int length;
+
+#ifdef _WIN32
+    char root[384];
+    DWORD root_len;
+
+    root_len = GetTempPathA(sizeof(root), root);
+    if (root_len == 0 || root_len >= sizeof(root)) return 0;
+    length = snprintf(test_port_reservation, sizeof(test_port_reservation),
+        "%srp2p-test-ports-%u.lock", root, (unsigned)base);
+    if (length < 0 || (size_t)length >= sizeof(test_port_reservation)) return 0;
+    if (!CreateDirectoryA(test_port_reservation, NULL)) {
+        test_port_reservation[0] = '\0';
+        return 0;
+    }
+#else
+    const char *tmp;
+
+    tmp = getenv("TMPDIR");
+    if (!tmp || !tmp[0]) tmp = "/tmp";
+    length = snprintf(test_port_reservation, sizeof(test_port_reservation),
+        "%s/rp2p-test-ports-%u.lock", tmp, (unsigned)base);
+    if (length < 0 || (size_t)length >= sizeof(test_port_reservation)) return 0;
+    if (mkdir(test_port_reservation, 0700) != 0) {
+        test_port_reservation[0] = '\0';
+        return 0;
+    }
+#endif
+    return 1;
+}
+
+/**
+ * Releases the current cross-process port block reservation.
+ * @return None.
+ */
+static void test_port_base_release(void) {
+    if (!test_port_reservation[0]) return;
+#ifdef _WIN32
+    RemoveDirectoryA(test_port_reservation);
+#else
+    rmdir(test_port_reservation);
+#endif
+    test_port_reservation[0] = '\0';
+}
+
+/**
+ * Returns a checked loopback port base for the active test case.
+ * @return Port base, or 0 when no candidate is available.
  */
 static unsigned short test_port_base(void) {
-    return (unsigned short)(20000UL + (test_pid() % 80UL) * 512UL);
+    static unsigned short selected;
+    struct sockaddr_in addr;
+    test_socklen_t addr_len;
+    unsigned int attempt;
+
+    if (selected != 0) return selected;
+    for (attempt = 0; attempt < 64U; attempt++) {
+        test_socket_t seed_fd;
+        unsigned short seed;
+        unsigned short candidate;
+
+        seed_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (seed_fd == TEST_SOCKET_INVALID) break;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        if (bind(seed_fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
+            test_socket_close(seed_fd);
+            break;
+        }
+        addr_len = sizeof(addr);
+        if (getsockname(seed_fd, (struct sockaddr *)&addr, &addr_len) != 0) {
+            test_socket_close(seed_fd);
+            break;
+        }
+        seed = ntohs(addr.sin_port);
+        test_socket_close(seed_fd);
+        candidate = (unsigned short)(10000U + seed % 50000U);
+        if (candidate > 65000U) candidate = (unsigned short)(candidate - 1000U);
+        if (!test_port_base_reserve(candidate)) continue;
+        if (test_port_base_available(candidate)) {
+            selected = candidate;
+            return selected;
+        }
+        test_port_base_release();
+    }
+    fprintf(stderr, "no available loopback ports for %s\n", test_case_name);
+    return 0;
 }
 
 /**
@@ -282,6 +465,149 @@ static int test_home_cleanup(void) {
 }
 
 /**
+ * Builds the test HOME registration key directory path.
+ * @param path Output path.
+ * @param cap Output capacity.
+ * @return 0 on success, 1 on overflow.
+ */
+static int test_key_dir(char *path, size_t cap) {
+    int n;
+
+    n = snprintf(path, cap, "%s/.local/share/rp2p/keys", test_home_path);
+    return n < 0 || (size_t)n >= cap ? 1 : 0;
+}
+
+/**
+ * Lists regular registration key filenames in the test HOME.
+ * @param names Output filename array.
+ * @param capacity Maximum filename count.
+ * @param count Output filename count.
+ * @return 0 on success, 1 on failure or overflow.
+ */
+static int test_key_list(char names[][128], int capacity, int *count) {
+    char dir[640];
+
+    if (test_key_dir(dir, sizeof(dir)) != 0 || !count) return 1;
+    *count = 0;
+#ifdef _WIN32
+    {
+        WIN32_FIND_DATAA entry;
+        char pattern[672];
+        HANDLE search;
+
+        if (snprintf(pattern, sizeof(pattern), "%s/*", dir) < 0 ||
+            strlen(pattern) >= sizeof(pattern))
+            return 1;
+        search = FindFirstFileA(pattern, &entry);
+        if (search == INVALID_HANDLE_VALUE)
+            return GetLastError() == ERROR_PATH_NOT_FOUND ? 0 : 1;
+        do {
+            if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (*count >= capacity || strlen(entry.cFileName) >= 128) {
+                FindClose(search);
+                return 1;
+            }
+            strcpy(names[*count], entry.cFileName);
+            (*count)++;
+        } while (FindNextFileA(search, &entry));
+        FindClose(search);
+    }
+#else
+    {
+        struct dirent *entry;
+        DIR *directory;
+
+        directory = opendir(dir);
+        if (!directory) return errno == ENOENT ? 0 : 1;
+        while ((entry = readdir(directory)) != NULL) {
+            if (entry->d_name[0] == '.') continue;
+            if (*count >= capacity || strlen(entry->d_name) >= 128) {
+                closedir(directory);
+                return 1;
+            }
+            strcpy(names[*count], entry->d_name);
+            (*count)++;
+        }
+        closedir(directory);
+    }
+#endif
+    return 0;
+}
+
+/**
+ * Builds one path below the registration key directory.
+ * @param name Filename.
+ * @param path Output path.
+ * @param cap Output capacity.
+ * @return 0 on success, 1 on overflow.
+ */
+static int test_key_path(const char *name, char *path, size_t cap) {
+    char dir[640];
+    int n;
+
+    if (test_key_dir(dir, sizeof(dir)) != 0) return 1;
+    n = snprintf(path, cap, "%s/%s", dir, name);
+    return n < 0 || (size_t)n >= cap ? 1 : 0;
+}
+
+/**
+ * Reads one complete small test file.
+ * @param path File path.
+ * @param data Output bytes.
+ * @param cap Output capacity.
+ * @param len Output byte count.
+ * @return 0 on success, 1 on failure or overflow.
+ */
+static int test_file_read(const char *path, char *data, size_t cap,
+    size_t *len)
+{
+    FILE *file;
+    size_t total;
+    int byte;
+
+    file = fopen(path, "rb");
+    if (!file) return 1;
+    total = fread(data, 1, cap, file);
+    byte = fgetc(file);
+    if (ferror(file) || byte != EOF || fclose(file) != 0) return 1;
+    if (len) *len = total;
+    return 0;
+}
+
+/**
+ * Replaces one small test file with exact bytes.
+ * @param path File path.
+ * @param data Input bytes.
+ * @param len Input byte count.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_file_write(const char *path, const char *data, size_t len) {
+    FILE *file;
+    size_t written;
+
+    file = fopen(path, "wb");
+    if (!file) return 1;
+    written = fwrite(data, 1, len, file);
+    if (written != len || fflush(file) != 0 || fclose(file) != 0) return 1;
+    return 0;
+}
+
+/**
+ * Reports whether one filesystem path exists.
+ * @param path Path to inspect.
+ * @return 1 when present, 0 otherwise.
+ */
+static int test_path_exists(const char *path) {
+#ifdef _WIN32
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat status;
+
+    return lstat(path, &status) == 0;
+#endif
+}
+
+/**
  * Starts platform socket state.
  * @return 0 on success, 1 on failure.
  */
@@ -321,6 +647,19 @@ static int test_socket_close(test_socket_t fd) {
 }
 
 /**
+ * Shuts down both directions of one socket.
+ * @param fd Socket descriptor.
+ * @return 0 on success, non-zero on failure.
+ */
+static int test_socket_shutdown(test_socket_t fd) {
+#ifdef _WIN32
+    return shutdown(fd, SD_BOTH);
+#else
+    return shutdown(fd, SHUT_RDWR);
+#endif
+}
+
+/**
  * Sets receive timeout on one socket.
  * @param fd Socket descriptor.
  * @param ms Timeout in milliseconds.
@@ -332,13 +671,96 @@ static int test_socket_timeout(test_socket_t fd, unsigned int ms) {
 
     tv = (DWORD)ms;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof(tv));
 #else
     struct timeval tv;
 
     tv.tv_sec = (time_t)(ms / 1000U);
     tv.tv_usec = (suseconds_t)(ms % 1000U) * 1000;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof(tv));
 #endif
+    return 0;
+}
+
+/**
+ * Reports whether the latest socket operation was interrupted.
+ * @return 1 when interrupted, 0 otherwise.
+ */
+static int test_socket_interrupted(void) {
+#ifdef _WIN32
+    return WSAGetLastError() == WSAEINTR;
+#else
+    return errno == EINTR;
+#endif
+}
+
+/**
+ * Reports whether the latest socket operation reached its short timeout.
+ * @return 1 when timed out or would block, 0 otherwise.
+ */
+static int test_socket_timed_out(void) {
+#ifdef _WIN32
+    int error;
+
+    error = WSAGetLastError();
+    return error == WSAETIMEDOUT || error == WSAEWOULDBLOCK;
+#else
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT;
+#endif
+}
+
+/**
+ * Sends an exact byte sequence before the socket timeout expires.
+ * @param fd Socket descriptor.
+ * @param data Bytes to send.
+ * @param len Byte count.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_socket_send_all(test_socket_t fd, const unsigned char *data,
+size_t len)
+{
+    size_t sent;
+
+    sent = 0;
+    while (sent < len) {
+        int n;
+
+        n = (int)send(fd, (const char *)data + sent, (int)(len - sent), 0);
+        if (n > 0) {
+            sent += (size_t)n;
+            continue;
+        }
+        if (n < 0 && test_socket_interrupted()) continue;
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * Receives an exact byte sequence before the socket timeout expires.
+ * @param fd Socket descriptor.
+ * @param data Destination buffer.
+ * @param len Byte count.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_socket_receive_exact(test_socket_t fd, unsigned char *data,
+size_t len)
+{
+    size_t received;
+
+    received = 0;
+    while (received < len) {
+        int n;
+
+        n = (int)recv(fd, (char *)data + received, (int)(len - received), 0);
+        if (n > 0) {
+            received += (size_t)n;
+            continue;
+        }
+        if (n < 0 && test_socket_interrupted()) continue;
+        return 1;
+    }
     return 0;
 }
 
@@ -373,11 +795,89 @@ static int test_port_open(unsigned short port) {
 static int test_wait_port(unsigned short port, int open) {
     int i;
 
-    for (i = 0; i < 80; i++) {
+    for (i = 0; i < 100; i++) {
         if (test_port_open(port) == open) return 1;
-        test_sleep_ms(100U);
+        test_sleep_ms(20U);
     }
     return 0;
+}
+
+/**
+ * Waits until one publisher is registered or has returned.
+ * @param publisher Publisher state.
+ * @return 0 when startup reaches an observable state, 1 on timeout.
+ */
+static int test_wait_publisher_ready(test_publisher_t *publisher) {
+    char request[RP2P_ID_MAX + 32];
+    char expected[RP2P_ID_MAX + 32];
+    int request_len;
+    int expected_len;
+    int observed;
+    unsigned int elapsed;
+
+    request_len = snprintf(request, sizeof(request),
+        "RP2P_CTRTOK_LOOKUP:%s\n", publisher->id);
+    expected_len = snprintf(expected, sizeof(expected),
+        "RP2P_CTRTOK_PUBLISHER:%s", publisher->id);
+    if (request_len < 0 || (size_t)request_len >= sizeof(request) ||
+        expected_len < 0 || (size_t)expected_len >= sizeof(expected))
+        return 1;
+    observed = 0;
+    for (elapsed = 0; elapsed < 2000U; elapsed += 20U) {
+        if (publisher->result != 999) return 0;
+        if (test_control_request(publisher->index_port,
+            (const unsigned char *)request, (size_t)request_len,
+            expected) == 0) {
+            observed++;
+            if (observed == 2) return 0;
+        } else {
+            observed = 0;
+        }
+        test_sleep_ms(20U);
+    }
+    fprintf(stderr, "publisher %s startup timed out: result=%d error=%s\n",
+        publisher->id, publisher->result, rp2p_get_error(publisher->ctx));
+    return 1;
+}
+
+/**
+ * Wakes one publisher control loop after requesting its stop.
+ * @param publisher Publisher state.
+ * @return None.
+ */
+static void test_publisher_wake(test_publisher_t *publisher) {
+    char request[RP2P_ID_MAX + 128];
+    test_socket_t fd;
+    int request_len;
+
+    fd = test_control_connect(publisher->index_port);
+    if (fd == TEST_SOCKET_INVALID) return;
+    request_len = snprintf(request, sizeof(request),
+        "RP2P_CTRTOK_PUNCH_REQ2:wake:%s:wake\n"
+        "RP2P_CTRTOK_CAND:host:127.0.0.1:9\n"
+        "RP2P_CTRTOK_END\n", publisher->id);
+    if (request_len > 0 && (size_t)request_len < sizeof(request))
+        test_socket_send_all(fd, (const unsigned char *)request,
+            (size_t)request_len);
+    test_socket_close(fd);
+}
+
+/**
+ * Waits until one TCP consumer listens or has returned.
+ * @param consumer Consumer state.
+ * @return 0 when listening, 1 on timeout or terminal failure.
+ */
+static int test_wait_consumer_ready(test_consumer_t *consumer) {
+    unsigned int elapsed;
+
+    for (elapsed = 0; elapsed < 2000U; elapsed += 20U) {
+        if (test_port_open(consumer->bind_port)) return 0;
+        if (consumer->result != 999) break;
+        test_sleep_ms(20U);
+    }
+    fprintf(stderr, "consumer %s startup failed: result=%d error=%s\n",
+        consumer->self_id, consumer->result, rp2p_get_error(consumer->ctx));
+    return 1;
 }
 
 /**
@@ -469,23 +969,112 @@ static void test_udp_echo_run(void *arg) {
  */
 static void test_tcp_echo_run(void *arg) {
     test_tcp_echo_t *echo;
+    unsigned int i;
 
     echo = (test_tcp_echo_t *)arg;
     while (!echo->stop) {
-        test_socket_t client;
-        unsigned char buf[1024];
-        int n;
+        fd_set readable;
+        struct timeval timeout;
+        int max_fd;
+        int selected;
 
-        client = accept(echo->fd, NULL, NULL);
-        if (client == TEST_SOCKET_INVALID) continue;
-        test_socket_timeout(client, 100U);
-        while (!echo->stop) {
-            n = (int)recv(client, (char *)buf, sizeof(buf), 0);
-            if (n > 0) {
-                send(client, (const char *)buf, n, 0);
-                continue;
+        FD_ZERO(&readable);
+        FD_SET(echo->fd, &readable);
+#ifdef _WIN32
+        max_fd = 0;
+#else
+        max_fd = (int)echo->fd;
+#endif
+        for (i = 0; i < TEST_TCP_CLIENTS; i++) {
+            if (echo->clients[i] == TEST_SOCKET_INVALID) continue;
+            FD_SET(echo->clients[i], &readable);
+#ifndef _WIN32
+            if (echo->clients[i] > max_fd) max_fd = echo->clients[i];
+#endif
+        }
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 100000;
+        selected = select(max_fd + 1, &readable, NULL, NULL, &timeout);
+        if (selected <= 0) continue;
+        if (FD_ISSET(echo->fd, &readable)) {
+            test_socket_t client;
+
+            client = accept(echo->fd, NULL, NULL);
+            if (client != TEST_SOCKET_INVALID) {
+                for (i = 0; i < TEST_TCP_CLIENTS; i++) {
+                    if (echo->clients[i] == TEST_SOCKET_INVALID) break;
+                }
+                if (i == TEST_TCP_CLIENTS) {
+                    test_socket_close(client);
+                } else {
+                    test_socket_timeout(client, 3000U);
+                    echo->clients[i] = client;
+                }
             }
-            if (n == 0) break;
+        }
+        for (i = 0; i < TEST_TCP_CLIENTS; i++) {
+            unsigned char buf[1024];
+            int n;
+
+            if (echo->clients[i] == TEST_SOCKET_INVALID ||
+                !FD_ISSET(echo->clients[i], &readable))
+                continue;
+            n = (int)recv(echo->clients[i], (char *)buf, sizeof(buf), 0);
+            if (n > 0 && test_socket_send_all(echo->clients[i], buf,
+                (size_t)n) == 0)
+                continue;
+            test_socket_close(echo->clients[i]);
+            echo->clients[i] = TEST_SOCKET_INVALID;
+        }
+    }
+    for (i = 0; i < TEST_TCP_CLIENTS; i++) {
+        if (echo->clients[i] == TEST_SOCKET_INVALID) continue;
+        test_socket_close(echo->clients[i]);
+        echo->clients[i] = TEST_SOCKET_INVALID;
+    }
+}
+
+/**
+ * Serves one incomplete lookup response and one version mismatch.
+ * @param arg Control stub state.
+ * @return None.
+ */
+static void test_control_stub_run(void *arg) {
+    static const unsigned char hello_ok[] = "RP2P_CTRTOK_HELLO_OK\n";
+    static const unsigned char incomplete[] = "RP2P_CTRTOK_NOT_FOUND";
+    static const unsigned char version_mismatch[] =
+        "RP2P_CTRTOK_ERROR:version mismatch\n";
+    test_control_stub_t *stub;
+    int request;
+
+    stub = (test_control_stub_t *)arg;
+    for (request = 0; request < 2; request++) {
+        test_socket_t client;
+        int lines;
+
+        client = accept(stub->fd, NULL, NULL);
+        if (client == TEST_SOCKET_INVALID) return;
+        test_socket_timeout(client, 2000U);
+        lines = 0;
+        while (lines < 2) {
+            char byte;
+            int n;
+
+            n = (int)recv(client, &byte, 1, 0);
+            if (n <= 0) break;
+            if (byte != '\n') continue;
+            lines++;
+            if (lines == 1 && request == 1) {
+                test_socket_send_all(client, version_mismatch,
+                    sizeof(version_mismatch) - 1);
+                break;
+            }
+            if (lines == 1 && test_socket_send_all(client, hello_ok,
+                sizeof(hello_ok) - 1) != 0)
+                break;
+            if (lines == 2)
+                test_socket_send_all(client, incomplete,
+                    sizeof(incomplete) - 1);
         }
         test_socket_close(client);
     }
@@ -562,6 +1151,16 @@ static DWORD WINAPI test_tcp_echo_main(void *arg) {
     test_tcp_echo_run(arg);
     return 0;
 }
+
+/**
+ * Runs an incomplete-response control stub thread.
+ * @param arg Thread argument.
+ * @return Thread status.
+ */
+static DWORD WINAPI test_control_stub_main(void *arg) {
+    test_control_stub_run(arg);
+    return 0;
+}
 #else
 /**
  * Runs an index server thread.
@@ -633,6 +1232,16 @@ static void *test_tcp_echo_main(void *arg) {
     test_tcp_echo_run(arg);
     return NULL;
 }
+
+/**
+ * Runs an incomplete-response control stub thread.
+ * @param arg Thread argument.
+ * @return NULL.
+ */
+static void *test_control_stub_main(void *arg) {
+    test_control_stub_run(arg);
+    return NULL;
+}
 #endif
 
 /**
@@ -682,7 +1291,35 @@ static int test_thread_join(test_thread_t thread) {
 static int test_index_start(test_index_t *index, unsigned short port) {
     memset(index, 0, sizeof(*index));
     index->port = port;
+    index->result = 999;
     if (rp2p_open(&index->ctx) != RP2P_OK) return 1;
+    if (test_thread_start(&index->thread, test_index_main, index) != 0) return 1;
+    return test_wait_port(port, 1) ? 0 : 1;
+}
+
+/**
+ * Starts one configured index server on a port.
+ * @param index Index state.
+ * @param port TCP port.
+ * @param seats Publisher capacity.
+ * @param vip Optional VIP seat map.
+ * @param pass Optional global registration password.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_index_start_configured(test_index_t *index,
+    unsigned short port, int seats, const char *vip, const char *pass)
+{
+    char err[128];
+
+    memset(index, 0, sizeof(*index));
+    index->port = port;
+    index->result = 999;
+    if (rp2p_open(&index->ctx) != RP2P_OK) return 1;
+    if (rp2p_set_seats(index->ctx, seats) != RP2P_OK) return 1;
+    if (vip != NULL && rp2p_set_vip(index->ctx, vip, err,
+        sizeof(err)) != RP2P_OK)
+        return 1;
+    if (pass != NULL && rp2p_set_pass(index->ctx, pass) != RP2P_OK) return 1;
     if (test_thread_start(&index->thread, test_index_main, index) != 0) return 1;
     return test_wait_port(port, 1) ? 0 : 1;
 }
@@ -694,6 +1331,7 @@ static int test_index_start(test_index_t *index, unsigned short port) {
  */
 static int test_index_stop(test_index_t *index) {
     if (index->ctx != NULL) rp2p_stop(index->ctx);
+    test_port_open(index->port);
     test_thread_join(index->thread);
     if (index->ctx != NULL) rp2p_close(index->ctx);
     index->ctx = NULL;
@@ -717,11 +1355,39 @@ unsigned short index_port, unsigned short bind_port)
     publisher->id = id;
     publisher->bind_port = bind_port;
     publisher->protocol = RP2P_PROTO_TCP;
+    publisher->result = 999;
     if (rp2p_open(&publisher->ctx) != RP2P_OK) return 1;
     if (test_thread_start(&publisher->thread, test_publisher_main,
         publisher) != 0) return 1;
-    test_sleep_ms(800U);
-    return 0;
+    return test_wait_publisher_ready(publisher);
+}
+
+/**
+ * Starts one password-configured TCP publisher context.
+ * @param publisher Publisher state.
+ * @param id Publisher id.
+ * @param index_port Index control port.
+ * @param bind_port Backend port value.
+ * @param pass Registration password.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_publisher_start_pass(test_publisher_t *publisher,
+    const char *id, unsigned short index_port, unsigned short bind_port,
+    const char *pass)
+{
+    memset(publisher, 0, sizeof(*publisher));
+    publisher->host = TEST_HOST;
+    publisher->index_port = index_port;
+    publisher->id = id;
+    publisher->bind_port = bind_port;
+    publisher->protocol = RP2P_PROTO_TCP;
+    publisher->pass = pass;
+    publisher->result = 999;
+    if (rp2p_open(&publisher->ctx) != RP2P_OK) return 1;
+    if (test_thread_start(&publisher->thread, test_publisher_main,
+        publisher) != 0)
+        return 1;
+    return test_wait_publisher_ready(publisher);
 }
 
 /**
@@ -731,10 +1397,43 @@ unsigned short index_port, unsigned short bind_port)
  */
 static int test_publisher_stop(test_publisher_t *publisher) {
     if (publisher->ctx != NULL) rp2p_stop(publisher->ctx);
+    test_publisher_wake(publisher);
     test_thread_join(publisher->thread);
     if (publisher->ctx != NULL) rp2p_close(publisher->ctx);
     publisher->ctx = NULL;
     return 0;
+}
+
+/**
+ * Joins one publisher that must have exited without a local stop request.
+ * @param publisher Publisher state.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_publisher_finish(test_publisher_t *publisher) {
+    int result;
+
+    result = test_thread_join(publisher->thread);
+    if (publisher->ctx != NULL) rp2p_close(publisher->ctx);
+    publisher->ctx = NULL;
+    return result;
+}
+
+/**
+ * Waits for one publisher operation to return.
+ * @param publisher Publisher state.
+ * @param timeout_ms Maximum wait in milliseconds.
+ * @return 1 when returned, 0 on timeout.
+ */
+static int test_publisher_wait_result(test_publisher_t *publisher,
+    unsigned int timeout_ms)
+{
+    unsigned int elapsed;
+
+    for (elapsed = 0; elapsed < timeout_ms; elapsed += 50U) {
+        if (publisher->result != 999) return 1;
+        test_sleep_ms(50U);
+    }
+    return publisher->result != 999;
 }
 
 /**
@@ -752,12 +1451,12 @@ static int test_udp_publisher_start(test_publisher_t *publisher,
     publisher->bind_port = bind_port;
     publisher->protocol = RP2P_PROTO_UDP;
     publisher->secret = secret;
+    publisher->result = 999;
     if (rp2p_open(&publisher->ctx) != RP2P_OK) return 1;
     if (test_thread_start(&publisher->thread, test_publisher_main,
         publisher) != 0)
         return 1;
-    test_sleep_ms(800U);
-    return 0;
+    return test_wait_publisher_ready(publisher);
 }
 
 /**
@@ -781,7 +1480,6 @@ static int test_udp_consumer_start(test_consumer_t *consumer,
     if (test_thread_start(&consumer->thread, test_consumer_main,
         consumer) != 0)
         return 1;
-    test_sleep_ms(400U);
     return 0;
 }
 
@@ -790,7 +1488,24 @@ static int test_udp_consumer_start(test_consumer_t *consumer,
  * @return 0 on success.
  */
 static int test_consumer_stop(test_consumer_t *consumer) {
+    struct sockaddr_in addr;
+    test_socket_t fd;
+
     if (consumer->ctx != NULL) rp2p_stop(consumer->ctx);
+    fd = socket(AF_INET, consumer->protocol == RP2P_PROTO_TCP ?
+        SOCK_STREAM : SOCK_DGRAM, 0);
+    if (fd != TEST_SOCKET_INVALID) {
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(consumer->bind_port);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (consumer->protocol == RP2P_PROTO_TCP)
+            connect(fd, (const struct sockaddr *)&addr, sizeof(addr));
+        else
+            sendto(fd, "", 0, 0, (const struct sockaddr *)&addr,
+                sizeof(addr));
+        test_socket_close(fd);
+    }
     test_thread_join(consumer->thread);
     if (consumer->ctx != NULL) rp2p_close(consumer->ctx);
     consumer->ctx = NULL;
@@ -825,7 +1540,19 @@ static int test_udp_echo_start(test_udp_echo_t *echo, unsigned short port) {
  * @return 0 on success.
  */
 static int test_udp_echo_stop(test_udp_echo_t *echo) {
+    struct sockaddr_in addr;
+    test_socket_t fd;
+
     echo->stop = 1;
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd != TEST_SOCKET_INVALID) {
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(echo->port);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        sendto(fd, "", 0, 0, (const struct sockaddr *)&addr, sizeof(addr));
+        test_socket_close(fd);
+    }
     test_thread_join(echo->thread);
     test_socket_close(echo->fd);
     echo->fd = TEST_SOCKET_INVALID;
@@ -838,10 +1565,13 @@ static int test_udp_echo_stop(test_udp_echo_t *echo) {
  */
 static int test_tcp_echo_start(test_tcp_echo_t *echo, unsigned short port) {
     struct sockaddr_in addr;
+    unsigned int i;
     int reuse;
 
     memset(echo, 0, sizeof(*echo));
     echo->port = port;
+    for (i = 0; i < TEST_TCP_CLIENTS; i++)
+        echo->clients[i] = TEST_SOCKET_INVALID;
     echo->fd = socket(AF_INET, SOCK_STREAM, 0);
     if (echo->fd == TEST_SOCKET_INVALID) return 1;
     reuse = 1;
@@ -867,10 +1597,58 @@ static int test_tcp_echo_start(test_tcp_echo_t *echo, unsigned short port) {
  */
 static int test_tcp_echo_stop(test_tcp_echo_t *echo) {
     echo->stop = 1;
+    test_socket_shutdown(echo->fd);
     test_thread_join(echo->thread);
     test_socket_close(echo->fd);
     echo->fd = TEST_SOCKET_INVALID;
     return 0;
+}
+
+/**
+ * Starts one bounded incomplete-response control stub.
+ * @param stub Control stub state.
+ * @param port TCP control port.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_control_stub_start(test_control_stub_t *stub,
+    unsigned short port)
+{
+    struct sockaddr_in addr;
+    int reuse;
+
+    memset(stub, 0, sizeof(*stub));
+    stub->port = port;
+    stub->fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (stub->fd == TEST_SOCKET_INVALID) return 1;
+    reuse = 1;
+    setsockopt(stub->fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse,
+        sizeof(reuse));
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(stub->fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+        listen(stub->fd, 1) != 0)
+    {
+        test_socket_close(stub->fd);
+        stub->fd = TEST_SOCKET_INVALID;
+        return 1;
+    }
+    return test_thread_start(&stub->thread, test_control_stub_main, stub);
+}
+
+/**
+ * Stops one completed incomplete-response control stub.
+ * @param stub Control stub state.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_control_stub_stop(test_control_stub_t *stub) {
+    int result;
+
+    result = test_thread_join(stub->thread);
+    if (stub->fd != TEST_SOCKET_INVALID) test_socket_close(stub->fd);
+    stub->fd = TEST_SOCKET_INVALID;
+    return result;
 }
 
 /**
@@ -893,8 +1671,7 @@ static int test_tcp_publisher_start(test_publisher_t *publisher,
     if (test_thread_start(&publisher->thread, test_publisher_main,
         publisher) != 0)
         return 1;
-    test_sleep_ms(800U);
-    return 0;
+    return test_wait_publisher_ready(publisher);
 }
 
 /**
@@ -918,22 +1695,18 @@ static int test_tcp_consumer_start(test_consumer_t *consumer,
     if (test_thread_start(&consumer->thread, test_consumer_main,
         consumer) != 0)
         return 1;
-    test_sleep_ms(800U);
-    return 0;
+    return test_wait_consumer_ready(consumer);
 }
 
 /**
- * Sends bytes through one local TCP adapter and waits for their echo.
- * @return Received byte count, or -1 on failure.
+ * Opens one bounded loopback TCP connection.
+ * @param port TCP port.
+ * @return Connected socket, or TEST_SOCKET_INVALID on failure.
  */
-static int test_tcp_roundtrip(unsigned short port, const unsigned char *data,
-    size_t len)
-{
+static test_socket_t test_tcp_connect(unsigned short port) {
     test_socket_t fd;
     struct sockaddr_in addr;
-    unsigned char received[1024];
     unsigned int attempt;
-    int n;
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -942,23 +1715,261 @@ static int test_tcp_roundtrip(unsigned short port, const unsigned char *data,
     fd = TEST_SOCKET_INVALID;
     for (attempt = 0; attempt < 20U; attempt++) {
         fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (fd == TEST_SOCKET_INVALID) return -1;
-        test_socket_timeout(fd, 3000U);
+        if (fd == TEST_SOCKET_INVALID) return TEST_SOCKET_INVALID;
+        test_socket_timeout(fd, 10000U);
         if (connect(fd, (const struct sockaddr *)&addr, sizeof(addr)) == 0)
             break;
         test_socket_close(fd);
         fd = TEST_SOCKET_INVALID;
         test_sleep_ms(100U);
     }
+    return fd;
+}
+
+/**
+ * Fills one buffer with deterministic non-repeating test bytes.
+ * @param data Destination buffer.
+ * @param len Byte count.
+ * @param seed Pattern seed.
+ * @return None.
+ */
+static void test_tcp_pattern(unsigned char *data, size_t len,
+unsigned int seed)
+{
+    size_t i;
+
+    for (i = 0; i < len; i++)
+        data[i] = (unsigned char)((i * 131U + i / 251U + seed) & 0xffU);
+}
+
+/**
+ * Sends and verifies one exact exchange on an open TCP session.
+ * @param fd Connected socket.
+ * @param data Bytes to exchange.
+ * @param len Byte count.
+ * @return Received byte count, or -1 on failure.
+ */
+static int test_tcp_exchange(test_socket_t fd, const unsigned char *data,
+size_t len)
+{
+    unsigned char *received;
+    int result;
+
+    received = (unsigned char *)malloc(len == 0 ? 1 : len);
+    if (received == NULL) return -1;
+    result = -1;
+    if (test_socket_send_all(fd, data, len) == 0 &&
+        test_socket_receive_exact(fd, received, len) == 0 &&
+        memcmp(received, data, len) == 0)
+        result = (int)len;
+    free(received);
+    return result;
+}
+
+/**
+ * Sends bytes through one local TCP adapter and waits for their exact echo.
+ * @param port TCP port.
+ * @param data Bytes to exchange.
+ * @param len Byte count.
+ * @return Received byte count, or -1 on failure.
+ */
+static int test_tcp_roundtrip(unsigned short port, const unsigned char *data,
+size_t len)
+{
+    test_socket_t fd;
+    int result;
+
+    fd = test_tcp_connect(port);
     if (fd == TEST_SOCKET_INVALID) return -1;
-    if (send(fd, (const char *)data, (int)len, 0) != (int)len) {
-        test_socket_close(fd);
-        return -1;
-    }
-    n = (int)recv(fd, (char *)received, sizeof(received), 0);
+    result = test_tcp_exchange(fd, data, len);
     test_socket_close(fd);
-    if (n != (int)len || memcmp(received, data, len) != 0) return -1;
-    return n;
+    return result;
+}
+
+/**
+ * Half-closes the sending direction of one TCP socket.
+ * @param fd Connected socket.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_tcp_shutdown_send(test_socket_t fd) {
+#ifdef _WIN32
+    return shutdown(fd, SD_SEND) == 0 ? 0 : 1;
+#else
+    return shutdown(fd, SHUT_WR) == 0 ? 0 : 1;
+#endif
+}
+
+/**
+ * Drains bounded in-flight bytes and waits for peer closure.
+ * @param fd Connected socket.
+ * @param limit Maximum bytes accepted before closure.
+ * @return 0 when closure is observed, 1 otherwise.
+ */
+static int test_tcp_wait_closed(test_socket_t fd, size_t limit) {
+    unsigned char received[1024];
+    size_t total;
+
+    total = 0;
+    while (total <= limit) {
+        int n;
+
+        n = (int)recv(fd, (char *)received, sizeof(received), 0);
+        if (n == 0) return 0;
+        if (n < 0 && test_socket_interrupted()) continue;
+        if (n < 0) return 1;
+        total += (size_t)n;
+    }
+    return 1;
+}
+
+/**
+ * Verifies prompt authenticated TCP rejection and peer closure.
+ * @param port Local TCP adapter port.
+ * @param consumer Consumer context state.
+ * @param publisher Publisher context state.
+ * @return 0 when authentication rejection is observed, 1 otherwise.
+ */
+static int test_tcp_auth_rejected(unsigned short port,
+    test_consumer_t *consumer, test_publisher_t *publisher)
+{
+    static const unsigned char payload[] = "authenticated-stream";
+    unsigned char received[64];
+    test_socket_t fd;
+    unsigned int elapsed;
+    int auth_seen;
+    int closed;
+
+    fd = test_tcp_connect(port);
+    if (fd == TEST_SOCKET_INVALID) return 1;
+    test_socket_timeout(fd, 20U);
+    if (test_socket_send_all(fd, payload, sizeof(payload) - 1) != 0) {
+        test_socket_close(fd);
+        return 1;
+    }
+    auth_seen = 0;
+    closed = 0;
+    for (elapsed = 0; elapsed < 1500U; elapsed += 20U) {
+        int n;
+
+        if (strstr(rp2p_get_error(consumer->ctx), "auth") != NULL ||
+            strstr(rp2p_get_error(publisher->ctx), "auth") != NULL)
+            auth_seen = 1;
+        if (!closed) {
+            n = (int)recv(fd, (char *)received, sizeof(received), 0);
+            if (n == 0 || (n < 0 && !test_socket_interrupted() &&
+                !test_socket_timed_out()))
+                closed = 1;
+        } else {
+            test_sleep_ms(20U);
+        }
+        if (auth_seen) break;
+    }
+    test_socket_close(fd);
+    if (!auth_seen) {
+        fprintf(stderr,
+            "TCP auth rejection timed out: closed=%d consumer=%s publisher=%s\n",
+            closed, rp2p_get_error(consumer->ctx),
+            rp2p_get_error(publisher->ctx));
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * Receives one complete LF-terminated control line.
+ * @param fd Socket descriptor.
+ * @param line Output line buffer.
+ * @param cap Output buffer capacity.
+ * @return Line length, or -1 on timeout, EOF, or overflow.
+ */
+static int test_control_receive_line(test_socket_t fd, char *line, size_t cap) {
+    size_t len;
+
+    if (!line || cap == 0) return -1;
+    len = 0;
+    for (;;) {
+        char byte;
+        int n;
+
+        n = (int)recv(fd, &byte, 1, 0);
+        if (n <= 0) return -1;
+        if (byte == '\n') {
+            line[len] = '\0';
+            return (int)len;
+        }
+        if (byte == '\r') continue;
+        if (len >= cap - 1) return -1;
+        line[len++] = byte;
+    }
+}
+
+/**
+ * Opens one version-negotiated index control connection.
+ * @param port Index control port.
+ * @return Connected socket, or TEST_SOCKET_INVALID on failure.
+ */
+static test_socket_t test_control_connect(unsigned short port) {
+    static const unsigned char hello[] = "RP2P_CTRTOK_HELLO RP2P/1\n";
+    test_socket_t fd;
+    char line[128];
+
+    fd = test_tcp_connect(port);
+    if (fd == TEST_SOCKET_INVALID) return fd;
+    test_socket_timeout(fd, 2000U);
+    if (test_socket_send_all(fd, hello, sizeof(hello) - 1) != 0 ||
+        test_control_receive_line(fd, line, sizeof(line)) < 0 ||
+        strcmp(line, "RP2P_CTRTOK_HELLO_OK") != 0)
+    {
+        test_socket_close(fd);
+        return TEST_SOCKET_INVALID;
+    }
+    return fd;
+}
+
+/**
+ * Sends raw bytes to an index and checks one complete response line.
+ * @param port Index control port.
+ * @param request Raw request bytes.
+ * @param request_len Request byte count.
+ * @param expected Expected response line.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_control_request(unsigned short port,
+    const unsigned char *request, size_t request_len, const char *expected)
+{
+    test_socket_t fd;
+    char line[256];
+    int result;
+
+    fd = test_control_connect(port);
+    if (fd == TEST_SOCKET_INVALID) return 1;
+    result = test_socket_send_all(fd, request, request_len) != 0 ||
+        test_control_receive_line(fd, line, sizeof(line)) < 0 ||
+        strcmp(line, expected) != 0;
+    test_socket_close(fd);
+    return result;
+}
+
+/**
+ * Sends an incomplete control frame and verifies server-side closure.
+ * @param port Index control port.
+ * @param request Raw request bytes.
+ * @param request_len Request byte count.
+ * @return 0 on observed closure, 1 otherwise.
+ */
+static int test_control_incomplete_closed(unsigned short port,
+    const unsigned char *request, size_t request_len)
+{
+    test_socket_t fd;
+    int result;
+
+    fd = test_control_connect(port);
+    if (fd == TEST_SOCKET_INVALID) return 1;
+    test_socket_send_all(fd, request, request_len);
+    test_tcp_shutdown_send(fd);
+    result = test_tcp_wait_closed(fd, 256U);
+    test_socket_close(fd);
+    return result;
 }
 
 /**
@@ -1220,10 +2231,13 @@ static int case_rp2p_stop(void) {
     int rc;
 
     rc = 0;
-    rc += expect_int("stop NULL", RP2P_ERROR, rp2p_stop(NULL));
+    rc += expect_int("stop NULL", RP2P_EINVAL, rp2p_stop(NULL));
     rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
+    rc += expect_true("stop initially clear", !rp2p_stop_requested(ctx));
     rc += expect_int("stop context", RP2P_OK, rp2p_stop(ctx));
+    rc += expect_true("stop requested", rp2p_stop_requested(ctx));
     rc += expect_int("stop context twice", RP2P_OK, rp2p_stop(ctx));
+    rc += expect_true("stop remains requested", rp2p_stop_requested(ctx));
     rp2p_close(ctx);
     return rc == 0 ? 0 : 1;
 }
@@ -1307,19 +2321,214 @@ static int case_rp2p_is_valid_pass_token(void) {
  * @return 0 on success, 1 on failure.
  */
 static int case_rp2p_serve_index(void) {
+    static const unsigned char malformed_register[] =
+        "RP2P_CTRTOK_REGISTER:bad:id\n";
+    static const unsigned char embedded_nul[] =
+        "RP2P_CTRTOK_LOOKUP:missing\0junk\n";
+    static const unsigned char prohibited_control[] =
+        "RP2P_CTRTOK_LOOKUP:missing\tjunk\n";
+    static const unsigned char incomplete_line[] =
+        "RP2P_CTRTOK_REGISTER:partial";
+    static const unsigned char unknown_command[] =
+        "RP2P_CTRTOK_UNKNOWN\n";
+    static const unsigned char empty_candidates[] =
+        "RP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
+        "RP2P_CTRTOK_END\n";
+    static const unsigned char invalid_candidate_type[] =
+        "RP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
+        "RP2P_CTRTOK_CAND:invalid:127.0.0.1:9\n"
+        "RP2P_CTRTOK_END\n";
+    static const unsigned char invalid_candidate_address[] =
+        "RP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
+        "RP2P_CTRTOK_CAND:host:not-an-address:9\n"
+        "RP2P_CTRTOK_END\n";
+    static const unsigned char invalid_candidate_port[] =
+        "RP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
+        "RP2P_CTRTOK_CAND:host:127.0.0.1:0\n"
+        "RP2P_CTRTOK_END\n";
+    static const unsigned char candidate_nul[] =
+        "RP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
+        "RP2P_CTRTOK_CAND:host:127.0.0.1:9\0junk\n"
+        "RP2P_CTRTOK_END\n";
+    static const unsigned char missing_candidate_end[] =
+        "RP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n"
+        "RP2P_CTRTOK_CAND:host:127.0.0.1:9\n";
+    static const unsigned char list_publishers[] =
+        "RP2P_CTRTOK_LIST_PUBLISHERS\n";
     test_index_t index;
+    test_publisher_t first;
+    test_publisher_t second;
+    test_publisher_t third;
+    rp2p_t *stopped;
+    unsigned char overlong[1102];
+    char too_many[4096];
     unsigned short port;
+    size_t used;
+    int i;
     int rc;
 
     rc = 0;
     port = (unsigned short)(test_port_base() + 1U);
     rc += expect_int("serve NULL", RP2P_EINVAL,
         rp2p_serve_index(NULL, TEST_HOST, port));
-    if (test_index_start(&index, port) != 0) return 1;
+    rc += expect_int("open stopped index context", RP2P_OK,
+        rp2p_open(&stopped));
+    rc += expect_int("stop index before entry", RP2P_OK,
+        rp2p_stop(stopped));
+    rc += expect_int("serve honors prior stop", RP2P_OK,
+        rp2p_serve_index(stopped, TEST_HOST, port));
+    rc += expect_true("prior-stopped index did not listen",
+        !test_port_open(port));
+    memset(&index, 0, sizeof(index));
+    index.ctx = stopped;
+    index.port = port;
+    index.result = 999;
+    if (test_thread_start(&index.thread, test_index_main, &index) != 0)
+        return 1;
+    if (!test_wait_port(port, 1)) return 1;
     rc += expect_true("index accepts TCP", test_port_open(port));
+    rc += expect_int("reject malformed REGISTER", 0,
+        test_control_request(port, malformed_register,
+            sizeof(malformed_register) - 1,
+            "RP2P_CTRTOK_ERROR:invalid id"));
+    rc += expect_int("reject embedded NUL command", 0,
+        test_control_request(port, embedded_nul, sizeof(embedded_nul) - 1,
+            "RP2P_CTRTOK_ERROR:malformed"));
+    rc += expect_int("reject prohibited command control", 0,
+        test_control_request(port, prohibited_control,
+            sizeof(prohibited_control) - 1,
+            "RP2P_CTRTOK_ERROR:malformed"));
+    rc += expect_int("reject unknown command", 0,
+        test_control_request(port, unknown_command,
+            sizeof(unknown_command) - 1,
+            "RP2P_CTRTOK_ERROR:unknown command"));
+    rc += expect_int("close incomplete command", 0,
+        test_control_incomplete_closed(port, incomplete_line,
+            sizeof(incomplete_line) - 1));
+    memset(overlong, 'x', sizeof(overlong));
+    overlong[sizeof(overlong) - 1] = '\n';
+    rc += expect_int("close overlong command", 0,
+        test_control_incomplete_closed(port, overlong, sizeof(overlong)));
+    rc += expect_int("reject empty candidate block", 0,
+        test_control_request(port, empty_candidates,
+            sizeof(empty_candidates) - 1,
+            "RP2P_CTRTOK_ERROR:malformed"));
+    rc += expect_int("reject candidate type", 0,
+        test_control_request(port, invalid_candidate_type,
+            sizeof(invalid_candidate_type) - 1,
+            "RP2P_CTRTOK_ERROR:malformed"));
+    rc += expect_int("reject candidate address", 0,
+        test_control_request(port, invalid_candidate_address,
+            sizeof(invalid_candidate_address) - 1,
+            "RP2P_CTRTOK_ERROR:malformed"));
+    rc += expect_int("reject candidate port", 0,
+        test_control_request(port, invalid_candidate_port,
+            sizeof(invalid_candidate_port) - 1,
+            "RP2P_CTRTOK_ERROR:malformed"));
+    rc += expect_int("reject candidate embedded NUL", 0,
+        test_control_request(port, candidate_nul, sizeof(candidate_nul) - 1,
+            "RP2P_CTRTOK_ERROR:malformed"));
+    rc += expect_int("close candidate block missing END", 0,
+        test_control_incomplete_closed(port, missing_candidate_end,
+            sizeof(missing_candidate_end) - 1));
+    used = (size_t)snprintf(too_many, sizeof(too_many),
+        "RP2P_CTRTOK_PUNCH_REQ2:client:missing:session\n");
+    for (i = 0; i < 17 && used < sizeof(too_many); i++) {
+        int written;
+
+        written = snprintf(too_many + used, sizeof(too_many) - used,
+            "RP2P_CTRTOK_CAND:host:127.0.0.1:%d\n", i + 1);
+        if (written < 0 || (size_t)written >= sizeof(too_many) - used) {
+            used = sizeof(too_many);
+            break;
+        }
+        used += (size_t)written;
+    }
+    if (used < sizeof(too_many)) {
+        int written = snprintf(too_many + used, sizeof(too_many) - used,
+            "RP2P_CTRTOK_END\n");
+        if (written < 0 || (size_t)written >= sizeof(too_many) - used)
+            used = sizeof(too_many);
+        else
+            used += (size_t)written;
+    }
+    rc += expect_true("build excessive candidate block",
+        used < sizeof(too_many));
+    if (used < sizeof(too_many))
+        rc += expect_int("reject excessive candidate count", 0,
+            test_control_request(port, (const unsigned char *)too_many, used,
+                "RP2P_CTRTOK_ERROR:malformed"));
+    rc += expect_int("index usable after malformed controls", 0,
+        test_control_request(port, list_publishers,
+            sizeof(list_publishers) - 1, "RP2P_CTRTOK_END"));
     test_index_stop(&index);
     rc += expect_int("stopped index result", RP2P_OK, index.result);
     rc += expect_true("index port closed", test_wait_port(port, 0));
+
+    port = (unsigned short)(test_port_base() + 2U);
+    rc += expect_int("start one-seat index", 0,
+        test_index_start_configured(&index, port, 1, NULL, NULL));
+    rc += expect_int("start first capacity publisher", 0,
+        test_publisher_start(&first, "capone", port,
+            (unsigned short)(port + 20U)));
+    rc += expect_true("first capacity publisher active",
+        first.result == 999);
+    rc += expect_int("start over-capacity publisher", 0,
+        test_publisher_start(&second, "captwo", port,
+            (unsigned short)(port + 21U)));
+    rc += expect_true("capacity reached is reported",
+        test_publisher_wait_result(&second, 2000U));
+    rc += expect_int("capacity rejection category", RP2P_EFULL,
+        second.result);
+    rc += expect_true("capacity rejection detail",
+        strstr(rp2p_get_error(second.ctx), "full") != NULL);
+    test_publisher_finish(&second);
+    test_publisher_stop(&first);
+    rc += expect_int("lookup removed disconnected publisher", 0,
+        test_control_request(port,
+            (const unsigned char *)"RP2P_CTRTOK_LOOKUP:capone\n",
+            strlen("RP2P_CTRTOK_LOOKUP:capone\n"),
+            "RP2P_CTRTOK_NOT_FOUND"));
+    rc += expect_int("start publisher after capacity release", 0,
+        test_publisher_start(&third, "capthree", port,
+            (unsigned short)(port + 22U)));
+    rc += expect_true("released capacity is reusable", third.result == 999);
+    test_publisher_stop(&third);
+    test_index_stop(&index);
+
+    port = (unsigned short)(test_port_base() + 3U);
+    rc += expect_int("start reserved-seat index", 0,
+        test_index_start_configured(&index, port, 2, "vip vippass",
+            "globalpass"));
+    rc += expect_int("start VIP publisher", 0,
+        test_publisher_start_pass(&first, "vip", port,
+            (unsigned short)(port + 20U), "vippass"));
+    rc += expect_int("start available non-VIP publisher", 0,
+        test_publisher_start_pass(&second, "regular", port,
+            (unsigned short)(port + 21U), "globalpass"));
+    rc += expect_true("VIP reserved seat active", first.result == 999);
+    rc += expect_true("non-VIP capacity active", second.result == 999);
+    rc += expect_int("start excess non-VIP publisher", 0,
+        test_publisher_start_pass(&third, "excess", port,
+            (unsigned short)(port + 22U), "globalpass"));
+    rc += expect_true("VIP reservation limits non-VIP seats",
+        test_publisher_wait_result(&third, 2000U));
+    rc += expect_int("reserved capacity rejection category", RP2P_EFULL,
+        third.result);
+    test_publisher_finish(&third);
+    rc += expect_int("start wrong-password VIP publisher", 0,
+        test_publisher_start_pass(&third, "vip", port,
+            (unsigned short)(port + 22U), "wrongpass"));
+    rc += expect_true("wrong-password VIP publisher returns",
+        test_publisher_wait_result(&third, 2000U));
+    rc += expect_int("registration mismatch category", RP2P_EAUTH,
+        third.result);
+    rc += expect_true("registration mismatch detail",
+        strstr(rp2p_get_error(third.ctx), "authentication") != NULL);
+    test_publisher_finish(&third);
+    test_publisher_stop(&second);
+    test_publisher_stop(&first);
+    test_index_stop(&index);
     return rc == 0 ? 0 : 1;
 }
 
@@ -1339,15 +2548,26 @@ static int case_rp2p_wait(void) {
     rc += expect_int("wait NULL", RP2P_EINVAL,
         rp2p_wait(NULL, TEST_HOST, base, "pub", (unsigned short)(base + 1U)));
     rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
+    rc += expect_int("stop wait before entry", RP2P_OK, rp2p_stop(ctx));
+    rc += expect_int("wait honors prior stop", RP2P_OK,
+        rp2p_wait(ctx, TEST_HOST, base, "pub",
+            (unsigned short)(base + 1U)));
+    rc += expect_true("wait stop consumed", !rp2p_stop_requested(ctx));
     rc += expect_int("wait without index", RP2P_ENET,
         rp2p_wait(ctx, TEST_HOST, base, "pub", (unsigned short)(base + 1U)));
     rp2p_close(ctx);
     if (test_index_start(&index, (unsigned short)(base + 2U)) != 0) return 1;
     if (test_publisher_start(&publisher, "waitpub", (unsigned short)(base + 2U),
         (unsigned short)(base + 3U)) != 0) return 1;
-    rc += expect_true("publisher remains running", publisher.result == 0);
-    test_publisher_stop(&publisher);
+    rc += expect_true("publisher remains running", publisher.result == 999);
     test_index_stop(&index);
+    rc += expect_true("publisher exits after index stop",
+        test_publisher_wait_result(&publisher, 3000U));
+    rc += expect_int("index loss publisher category", RP2P_ENET,
+        publisher.result);
+    rc += expect_true("index loss publisher detail",
+        strstr(rp2p_get_error(publisher.ctx), "control") != NULL);
+    test_publisher_finish(&publisher);
     return rc == 0 ? 0 : 1;
 }
 
@@ -1356,9 +2576,13 @@ static int case_rp2p_wait(void) {
  * @return 0 on success, 1 on failure.
  */
 static int case_rp2p_connect(void) {
+    test_control_stub_t stub;
     test_index_t index;
+    test_publisher_t publisher;
+    test_tcp_echo_t occupied;
     rp2p_t *ctx;
     unsigned short base;
+    int stub_started;
     int rc;
 
     rc = 0;
@@ -1367,6 +2591,12 @@ static int case_rp2p_connect(void) {
         rp2p_connect(NULL, TEST_HOST, base, "client", "missing",
             (unsigned short)(base + 1U)));
     rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
+    rp2p_set_port(ctx, (unsigned short)(base + 1U));
+    rc += expect_int("stop connect before entry", RP2P_OK, rp2p_stop(ctx));
+    rc += expect_int("connect honors prior stop", RP2P_OK,
+        rp2p_connect(ctx, TEST_HOST, base, "client", "missing",
+            (unsigned short)(base + 1U)));
+    rc += expect_true("connect stop consumed", !rp2p_stop_requested(ctx));
     rp2p_set_port(ctx, (unsigned short)(base + 1U));
     rc += expect_int("connect without index", RP2P_ENET,
         rp2p_connect(ctx, TEST_HOST, base, "client", "missing",
@@ -1379,7 +2609,39 @@ static int case_rp2p_connect(void) {
         rp2p_connect(ctx, TEST_HOST, (unsigned short)(base + 2U), "client",
             "missing", (unsigned short)(base + 3U)));
     rp2p_close(ctx);
+    rc += expect_int("start occupied-listener publisher", 0,
+        test_publisher_start(&publisher, "occupied",
+            (unsigned short)(base + 2U), (unsigned short)(base + 6U)));
+    rc += expect_int("occupy consumer listener", 0,
+        test_tcp_echo_start(&occupied, (unsigned short)(base + 7U)));
+    rc += expect_int("open occupied-listener context", RP2P_OK,
+        rp2p_open(&ctx));
+    rp2p_set_port(ctx, (unsigned short)(base + 7U));
+    rc += expect_int("occupied consumer listener category", RP2P_ENET,
+        rp2p_connect(ctx, TEST_HOST, (unsigned short)(base + 2U), "client",
+            "occupied", (unsigned short)(base + 7U)));
+    rp2p_close(ctx);
+    test_tcp_echo_stop(&occupied);
+    test_publisher_stop(&publisher);
     test_index_stop(&index);
+    stub_started = test_control_stub_start(&stub,
+        (unsigned short)(base + 4U));
+    rc += expect_int("start incomplete control response", 0, stub_started);
+    if (stub_started == 0) {
+        rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
+        rp2p_set_port(ctx, (unsigned short)(base + 5U));
+        rc += expect_int("reject incomplete control response", RP2P_ENET,
+            rp2p_connect(ctx, TEST_HOST, (unsigned short)(base + 4U),
+                "client", "missing", (unsigned short)(base + 5U)));
+        rc += expect_int("control version mismatch category", RP2P_EVERSION,
+            rp2p_connect(ctx, TEST_HOST, (unsigned short)(base + 4U),
+                "client", "missing", (unsigned short)(base + 5U)));
+        rc += expect_true("control version mismatch detail",
+            strstr(rp2p_get_error(ctx), "version mismatch") != NULL);
+        rp2p_close(ctx);
+        rc += expect_int("stop incomplete control response", 0,
+            test_control_stub_stop(&stub));
+    }
     return rc == 0 ? 0 : 1;
 }
 
@@ -1455,8 +2717,10 @@ static int test_udp_tunnel_case(const char *publisher_secret,
             rp2p_get_error(consumer.ctx)[0] != '\0' ||
             rp2p_get_error(publisher.ctx)[0] != '\0');
         rc += expect_true("UDP security mismatch detail",
-            rp2p_get_error(consumer.ctx)[0] != '\0' ||
-            rp2p_get_error(publisher.ctx)[0] != '\0');
+            strstr(rp2p_get_error(consumer.ctx), "auth") != NULL ||
+            strstr(rp2p_get_error(consumer.ctx), "security") != NULL ||
+            strstr(rp2p_get_error(publisher.ctx), "auth") != NULL ||
+            strstr(rp2p_get_error(publisher.ctx), "security") != NULL);
     }
     test_consumer_stop(&consumer);
     test_publisher_stop(&publisher);
@@ -1506,11 +2770,185 @@ static int case_rp2p_udp_secret_mismatch(void) {
 }
 
 /**
+ * Exercises bounded authenticated TCP stream lifecycle and payload behavior.
+ * @param port Local TCP adapter port.
+ * @param echo Running TCP backend stopped by the final close scenario.
+ * @return 0 on success, 1 on failure.
+ */
+static int test_tcp_secure_coverage(unsigned short port, test_tcp_echo_t *echo) {
+    unsigned char first[1537];
+    unsigned char second[3073];
+    unsigned char concurrent_first[4096];
+    unsigned char concurrent_first_received[4096];
+    unsigned char concurrent_second[6145];
+    unsigned char concurrent_second_received[6145];
+    unsigned char half_payload[4097];
+    unsigned char half_received[4097];
+    unsigned char ready[1];
+    unsigned char *large;
+    test_socket_t fd;
+    test_socket_t first_fd;
+    test_socket_t second_fd;
+    char *drop_previous;
+    char *reorder_previous;
+    const char *env;
+    int drop_saved;
+    int fault_env_ready;
+    int reorder_saved;
+    int result;
+    int rc;
+
+    rc = 0;
+    drop_previous = NULL;
+    reorder_previous = NULL;
+    env = getenv("RP2P_DEBUG_STREAM_DROP_EVERY");
+    if (env != NULL) {
+        drop_previous = (char *)malloc(strlen(env) + 1U);
+        if (drop_previous != NULL) memcpy(drop_previous, env, strlen(env) + 1U);
+    }
+    drop_saved = env == NULL || drop_previous != NULL;
+    env = getenv("RP2P_DEBUG_STREAM_REORDER_EVERY");
+    if (env != NULL) {
+        reorder_previous = (char *)malloc(strlen(env) + 1U);
+        if (reorder_previous != NULL)
+            memcpy(reorder_previous, env, strlen(env) + 1U);
+    }
+    reorder_saved = env == NULL || reorder_previous != NULL;
+    fault_env_ready = drop_saved && reorder_saved;
+    rc += expect_true("save TCP fault environment", fault_env_ready);
+    if (fault_env_ready) {
+        fault_env_ready = test_setenv("RP2P_DEBUG_STREAM_DROP_EVERY", "7") == 0 &&
+            test_setenv("RP2P_DEBUG_STREAM_REORDER_EVERY", "11") == 0;
+        rc += expect_true("enable TCP drop and reorder faults", fault_env_ready);
+    }
+    large = (unsigned char *)malloc(TEST_TCP_LARGE_SIZE);
+    rc += expect_true("allocate TCP patterned payload", large != NULL);
+    if (large != NULL) {
+        test_tcp_pattern(large, TEST_TCP_LARGE_SIZE, 7U);
+        if (fault_env_ready)
+            rc += expect_int(
+                "TCP drop/reorder recovery beyond 64-frame window",
+                (int)TEST_TCP_LARGE_SIZE,
+                test_tcp_roundtrip(port, large, TEST_TCP_LARGE_SIZE));
+    }
+    rc += expect_int("restore TCP drop fault environment", 0,
+        drop_saved ? test_setenv("RP2P_DEBUG_STREAM_DROP_EVERY",
+            drop_previous) : 0);
+    rc += expect_int("restore TCP reorder fault environment", 0,
+        reorder_saved ? test_setenv("RP2P_DEBUG_STREAM_REORDER_EVERY",
+            reorder_previous) : 0);
+    free(drop_previous);
+    free(reorder_previous);
+
+    test_tcp_pattern(first, sizeof(first), 11U);
+    test_tcp_pattern(second, sizeof(second), 23U);
+    fd = test_tcp_connect(port);
+    rc += expect_true("open TCP bidirectional session",
+        fd != TEST_SOCKET_INVALID);
+    if (fd != TEST_SOCKET_INVALID) {
+        rc += expect_int("TCP first same-session direction",
+            (int)sizeof(first), test_tcp_exchange(fd, first, sizeof(first)));
+        rc += expect_int("TCP second same-session direction",
+            (int)sizeof(second), test_tcp_exchange(fd, second, sizeof(second)));
+        test_socket_close(fd);
+    }
+
+    test_tcp_pattern(half_payload, sizeof(half_payload), 31U);
+    memset(half_received, 0, sizeof(half_received));
+    fd = test_tcp_connect(port);
+    rc += expect_true("open TCP half-close session",
+        fd != TEST_SOCKET_INVALID);
+    if (fd != TEST_SOCKET_INVALID) {
+        result = test_socket_send_all(fd, half_payload,
+            sizeof(half_payload));
+        if (result == 0) result = test_tcp_shutdown_send(fd);
+        if (result == 0)
+            result = test_socket_receive_exact(fd, half_received,
+                sizeof(half_received));
+        if (result == 0 && memcmp(half_payload, half_received,
+            sizeof(half_payload)) != 0)
+            result = 1;
+        rc += expect_int("TCP half-close preserves pending response", 0,
+            result);
+        rc += expect_int("TCP half-close reaches peer EOF", 0,
+            test_tcp_wait_closed(fd, 0));
+        test_socket_close(fd);
+    }
+
+    test_tcp_pattern(concurrent_first, sizeof(concurrent_first), 43U);
+    test_tcp_pattern(concurrent_second, sizeof(concurrent_second), 59U);
+    first_fd = test_tcp_connect(port);
+    second_fd = test_tcp_connect(port);
+    rc += expect_true("open bounded concurrent TCP sessions",
+        first_fd != TEST_SOCKET_INVALID && second_fd != TEST_SOCKET_INVALID);
+    if (first_fd != TEST_SOCKET_INVALID &&
+        second_fd != TEST_SOCKET_INVALID)
+    {
+        result = test_socket_send_all(first_fd, concurrent_first,
+            sizeof(concurrent_first));
+        if (result == 0)
+            result = test_socket_send_all(second_fd, concurrent_second,
+                sizeof(concurrent_second));
+        if (result == 0)
+            result = test_socket_receive_exact(first_fd,
+                concurrent_first_received,
+                sizeof(concurrent_first));
+        if (result == 0 && memcmp(concurrent_first, concurrent_first_received,
+            sizeof(concurrent_first)) != 0)
+            result = 1;
+        if (result == 0)
+            result = test_socket_receive_exact(second_fd,
+                concurrent_second_received,
+                sizeof(concurrent_second));
+        if (result == 0 && memcmp(concurrent_second,
+            concurrent_second_received,
+            sizeof(concurrent_second)) != 0)
+            result = 1;
+        rc += expect_int("TCP concurrent session isolation", 0, result);
+    }
+    if (first_fd != TEST_SOCKET_INVALID) test_socket_close(first_fd);
+    if (second_fd != TEST_SOCKET_INVALID) test_socket_close(second_fd);
+
+    if (large != NULL) {
+        fd = test_tcp_connect(port);
+        rc += expect_true("open TCP client-close session",
+            fd != TEST_SOCKET_INVALID);
+        if (fd != TEST_SOCKET_INVALID) {
+            rc += expect_int("send TCP client-close payload", 0,
+                test_socket_send_all(fd, large, TEST_TCP_LARGE_SIZE / 2U));
+            test_socket_close(fd);
+        }
+        rc += expect_int("TCP session after client close", (int)sizeof(first),
+            test_tcp_roundtrip(port, first, sizeof(first)));
+    }
+
+    ready[0] = 0xa5U;
+    fd = test_tcp_connect(port);
+    rc += expect_true("open TCP backend-close session",
+        fd != TEST_SOCKET_INVALID);
+    if (fd != TEST_SOCKET_INVALID) {
+        rc += expect_int("establish TCP backend-close session", 1,
+            test_tcp_exchange(fd, ready, sizeof(ready)));
+        if (large != NULL)
+            rc += expect_int("send TCP backend-close payload", 0,
+                test_socket_send_all(fd, large, TEST_TCP_LARGE_SIZE / 2U));
+    }
+    test_tcp_echo_stop(echo);
+    if (fd != TEST_SOCKET_INVALID) {
+        rc += expect_int("TCP backend close reaches client", 0,
+            test_tcp_wait_closed(fd, TEST_TCP_LARGE_SIZE / 2U));
+        test_socket_close(fd);
+    }
+    free(large);
+    return rc == 0 ? 0 : 1;
+}
+
+/**
  * Runs one public-API TCP authentication regression scenario.
  * @return 0 on success, 1 on failure.
  */
 static int test_tcp_tunnel_case(const char *publisher_secret,
-    const char *consumer_secret, int expect_success,
+    const char *consumer_secret, int expect_success, int expanded,
     unsigned short port_offset)
 {
     test_index_t index;
@@ -1519,10 +2957,12 @@ static int test_tcp_tunnel_case(const char *publisher_secret,
     test_tcp_echo_t echo;
     unsigned char payload[] = "authenticated-stream";
     unsigned short base;
+    int expanded_ran;
     int result;
     int rc;
 
     rc = 0;
+    expanded_ran = 0;
     base = (unsigned short)(test_port_base() + 400U + port_offset);
     rc += expect_int("start TCP echo", 0,
         test_tcp_echo_start(&echo, (unsigned short)(base + 1U)));
@@ -1533,20 +2973,29 @@ static int test_tcp_tunnel_case(const char *publisher_secret,
     rc += expect_int("start TCP consumer", 0,
         test_tcp_consumer_start(&consumer, "tcpclient", "tcppub", base,
             (unsigned short)(base + 2U), consumer_secret));
-    result = rc == 0 ? test_tcp_roundtrip((unsigned short)(base + 2U),
-        payload, sizeof(payload) - 1) : -1;
-    if (expect_success) {
+    result = -1;
+    if (rc == 0 && expect_success && expanded) {
+        expanded_ran = 1;
+        rc += test_tcp_secure_coverage((unsigned short)(base + 2U), &echo);
+    } else if (rc == 0 && expect_success) {
+        result = test_tcp_roundtrip((unsigned short)(base + 2U), payload,
+            sizeof(payload) - 1);
+    } else if (rc == 0) {
+        result = test_tcp_auth_rejected((unsigned short)(base + 2U),
+            &consumer, &publisher);
+    }
+    if (expect_success && !expanded) {
         rc += expect_int("TCP authenticated roundtrip",
             (int)sizeof(payload) - 1, result);
-    } else {
-        rc += expect_int("TCP secret mismatch rejected", -1, result);
+    } else if (!expect_success) {
+        rc += expect_int("TCP secret mismatch rejected", 0, result);
         rp2p_stop(consumer.ctx);
         rp2p_stop(publisher.ctx);
         test_thread_join(consumer.thread);
         test_thread_join(publisher.thread);
         rc += expect_true("TCP secret mismatch detail",
-            rp2p_get_error(consumer.ctx)[0] != '\0' ||
-            rp2p_get_error(publisher.ctx)[0] != '\0');
+            strstr(rp2p_get_error(consumer.ctx), "auth") != NULL ||
+            strstr(rp2p_get_error(publisher.ctx), "auth") != NULL);
         rp2p_close(consumer.ctx);
         rp2p_close(publisher.ctx);
         consumer.ctx = NULL;
@@ -1555,7 +3004,7 @@ static int test_tcp_tunnel_case(const char *publisher_secret,
     if (consumer.ctx != NULL) test_consumer_stop(&consumer);
     if (publisher.ctx != NULL) test_publisher_stop(&publisher);
     test_index_stop(&index);
-    test_tcp_echo_stop(&echo);
+    if (!expanded_ran) test_tcp_echo_stop(&echo);
     return rc == 0 ? 0 : 1;
 }
 
@@ -1564,7 +3013,7 @@ static int test_tcp_tunnel_case(const char *publisher_secret,
  * @return 0 on success, 1 on failure.
  */
 static int case_rp2p_tcp_secure(void) {
-    return test_tcp_tunnel_case("secret", "secret", 1, 0);
+    return test_tcp_tunnel_case("secret", "secret", 1, 1, 0);
 }
 
 /**
@@ -1572,7 +3021,7 @@ static int case_rp2p_tcp_secure(void) {
  * @return 0 on success, 1 on failure.
  */
 static int case_rp2p_tcp_secret_mismatch(void) {
-    return test_tcp_tunnel_case("secret", "other", 0, 10);
+    return test_tcp_tunnel_case("secret", "other", 0, 0, 10);
 }
 
 /**
@@ -1580,25 +3029,264 @@ static int case_rp2p_tcp_secret_mismatch(void) {
  * @return 0 on success, 1 on failure.
  */
 static int case_rp2p_deregister(void) {
-    test_index_t index;
+    test_index_t first_index;
+    test_index_t second_index;
+    test_publisher_t first_publisher;
+    test_publisher_t second_publisher;
     test_publisher_t publisher;
+    test_publishers_t publishers;
     rp2p_t *client;
+    char names[8][128];
+    char paths[8][768];
+    char key_data[64];
+    char legacy_path[768];
+    char blocked_home[640];
+    char long_home[900];
+    size_t key_len;
     unsigned short base;
+    int first_index_started;
+    int second_index_started;
+    int first_publisher_started;
+    int second_publisher_started;
+    int publisher_started;
+    int count;
     int rc;
+#ifndef _WIN32
+    mode_t old_umask;
+    struct stat status;
+#endif
 
     rc = 0;
+    client = NULL;
+    first_index_started = 0;
+    second_index_started = 0;
+    first_publisher_started = 0;
+    second_publisher_started = 0;
+    publisher_started = 0;
+    memset(&first_index, 0, sizeof(first_index));
+    memset(&second_index, 0, sizeof(second_index));
+    memset(&first_publisher, 0, sizeof(first_publisher));
+    memset(&second_publisher, 0, sizeof(second_publisher));
+    memset(&publisher, 0, sizeof(publisher));
+#ifndef _WIN32
+    old_umask = umask(000);
+#endif
     base = (unsigned short)(test_port_base() + 60U);
-    rc += expect_int("deregister missing key", RP2P_ENOENT,
-        rp2p_deregister(NULL, TEST_HOST, base, "absent"));
-    if (test_index_start(&index, (unsigned short)(base + 1U)) != 0) return 1;
-    if (test_publisher_start(&publisher, "gone", (unsigned short)(base + 1U),
-        (unsigned short)(base + 2U)) != 0) return 1;
     rc += expect_int("open client", RP2P_OK, rp2p_open(&client));
-    rc += expect_int("deregister publisher", RP2P_OK,
-        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 1U), "gone"));
-    rp2p_close(client);
+    if (!client) goto cleanup;
+    rc += expect_int("deregister NULL context", RP2P_EINVAL,
+        rp2p_deregister(NULL, TEST_HOST, base, "absent"));
+    rc += expect_int("deregister NULL host", RP2P_EINVAL,
+        rp2p_deregister(client, NULL, base, "absent"));
+    rc += expect_true("NULL host detail", rp2p_get_error(client)[0] != '\0');
+    rc += expect_int("deregister empty host", RP2P_EINVAL,
+        rp2p_deregister(client, "", base, "absent"));
+    rc += expect_int("deregister zero port", RP2P_EINVAL,
+        rp2p_deregister(client, TEST_HOST, 0, "absent"));
+    rc += expect_int("deregister invalid id", RP2P_EINVAL,
+        rp2p_deregister(client, TEST_HOST, base, "../unsafe"));
+    rc += expect_int("deregister missing key", RP2P_ENOENT,
+        rp2p_deregister(client, TEST_HOST, base, "absent"));
+
+    if (test_index_start(&first_index, (unsigned short)(base + 1U)) != 0)
+        goto cleanup;
+    first_index_started = 1;
+    if (test_index_start(&second_index, (unsigned short)(base + 2U)) != 0)
+        goto cleanup;
+    second_index_started = 1;
+    if (test_publisher_start(&first_publisher, "shared",
+        (unsigned short)(base + 1U), (unsigned short)(base + 3U)) != 0)
+        goto cleanup;
+    first_publisher_started = 1;
+    if (test_publisher_start(&second_publisher, "shared",
+        (unsigned short)(base + 2U), (unsigned short)(base + 4U)) != 0)
+        goto cleanup;
+    second_publisher_started = 1;
+
+    rc += expect_int("list two scoped keys", 0,
+        test_key_list(names, 8, &count));
+    rc += expect_int("same id has two scoped keys", 2, count);
+    for (int i = 0; i < count; i++) {
+        int valid_name;
+
+        valid_name = strlen(names[i]) == 64;
+        for (size_t j = 0; valid_name && j < strlen(names[i]); j++) {
+            char byte;
+
+            byte = names[i][j];
+            valid_name = (byte >= '0' && byte <= '9') ||
+                (byte >= 'a' && byte <= 'f');
+        }
+        rc += expect_true("scoped filename is bounded hex", valid_name);
+        if (test_key_path(names[i], paths[i], sizeof(paths[i])) != 0) {
+            rc++;
+            continue;
+        }
+        rc += expect_int("read scoped key", 0,
+            test_file_read(paths[i], key_data, sizeof(key_data), &key_len));
+        rc += expect_int("scoped key content length", 17, (int)key_len);
+        rc += expect_true("scoped key line ending",
+            key_len == 17 && key_data[16] == '\n');
+#ifndef _WIN32
+        rc += expect_int("scoped key stat", 0, stat(paths[i], &status));
+        rc += expect_int("scoped key permissions", 0600,
+            (int)(status.st_mode & 0777));
+#endif
+    }
+
+    rc += expect_int("deregister first scoped publisher", RP2P_OK,
+        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 1U),
+            "shared"));
+    rc += expect_string("successful deregistration clears detail", "",
+        rp2p_get_error(client));
+    rc += expect_int("list remaining scoped key", 0,
+        test_key_list(names, 8, &count));
+    rc += expect_int("successful deregistration deletes one key", 1, count);
+    if (count != 1 || test_key_path(names[0], paths[0], sizeof(paths[0])) != 0 ||
+        test_file_read(paths[0], key_data, sizeof(key_data), &key_len) != 0)
+    {
+        rc++;
+        goto cleanup;
+    }
+    test_publisher_stop(&first_publisher);
+    first_publisher_started = 0;
+
+    rc += expect_int("write malformed key", 0,
+        test_file_write(paths[0], "0123456789abcdeg", 16));
+    rc += expect_int("reject malformed key", RP2P_EPROTO,
+        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
+            "shared"));
+    rc += expect_true("malformed key preserved", test_path_exists(paths[0]));
+    rc += expect_int("write truncated key", 0,
+        test_file_write(paths[0], "01234567", 8));
+    rc += expect_int("reject truncated key", RP2P_EPROTO,
+        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
+            "shared"));
+    rc += expect_true("truncated key preserved", test_path_exists(paths[0]));
+    rc += expect_int("write extra key", 0,
+        test_file_write(paths[0], "0123456789abcdefx", 17));
+    rc += expect_int("reject extra key", RP2P_EPROTO,
+        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
+            "shared"));
+    rc += expect_true("extra key preserved", test_path_exists(paths[0]));
+    rc += expect_int("restore valid key", 0,
+        test_file_write(paths[0], key_data, key_len));
+
+    test_index_stop(&second_index);
+    second_index_started = 0;
+    rc += expect_int("failed deregistration category", RP2P_ENET,
+        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
+            "shared"));
+    rc += expect_true("failed deregistration preserves key",
+        test_path_exists(paths[0]));
+    test_publisher_stop(&second_publisher);
+    second_publisher_started = 0;
+    remove(paths[0]);
+#ifndef _WIN32
+    rc += expect_int("create key path directory", 0, mkdir(paths[0], 0700));
+    rc += expect_int("reject key path directory", RP2P_ERROR,
+        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 2U),
+            "shared"));
+    rc += expect_int("remove key path directory", 0, rmdir(paths[0]));
+#endif
+
+    if (test_publisher_start(&publisher, "shutdown",
+        (unsigned short)(base + 1U), (unsigned short)(base + 5U)) != 0)
+        goto cleanup;
+    publisher_started = 1;
+    rc += expect_int("shutdown key created", 0,
+        test_key_list(names, 8, &count));
+    rc += expect_int("shutdown key count", 1, count);
     test_publisher_stop(&publisher);
-    test_index_stop(&index);
+    publisher_started = 0;
+    rc += expect_int("shutdown key list", 0,
+        test_key_list(names, 8, &count));
+    rc += expect_int("successful shutdown deletes scoped key", 0, count);
+
+    if (test_publisher_start(&publisher, "legacy",
+        (unsigned short)(base + 1U), (unsigned short)(base + 6U)) != 0)
+        goto cleanup;
+    publisher_started = 1;
+    if (test_key_list(names, 8, &count) != 0 || count != 1 ||
+        test_key_path(names[0], paths[0], sizeof(paths[0])) != 0 ||
+        test_file_read(paths[0], key_data, sizeof(key_data), &key_len) != 0 ||
+        test_key_path("legacy", legacy_path, sizeof(legacy_path)) != 0)
+    {
+        rc++;
+        goto cleanup;
+    }
+    rc += expect_int("create legacy key", 0,
+        test_file_write(legacy_path, key_data, key_len));
+    rc += expect_int("remove scoped key for migration", 0, remove(paths[0]));
+    rc += expect_int("legacy deregistration", RP2P_OK,
+        rp2p_deregister(client, TEST_HOST, (unsigned short)(base + 1U),
+            "legacy"));
+    rc += expect_true("successful legacy lookup removes legacy key",
+        !test_path_exists(legacy_path));
+    test_publisher_stop(&publisher);
+    publisher_started = 0;
+
+#ifdef _WIN32
+    test_setenv("USERPROFILE", test_home_path);
+    test_setenv("HOME", NULL);
+    rc += expect_int("missing HOME uses USERPROFILE", RP2P_ENOENT,
+        rp2p_deregister(client, TEST_HOST, base, "absent"));
+    test_setenv("HOME", "");
+    rc += expect_int("empty HOME uses USERPROFILE", RP2P_ENOENT,
+        rp2p_deregister(client, TEST_HOST, base, "absent"));
+#else
+    test_setenv("HOME", NULL);
+    rc += expect_int("missing HOME category", RP2P_ERROR,
+        rp2p_deregister(client, TEST_HOST, base, "absent"));
+    rc += expect_true("missing HOME detail", rp2p_get_error(client)[0] != '\0');
+    test_setenv("HOME", "");
+    rc += expect_int("empty HOME category", RP2P_ERROR,
+        rp2p_deregister(client, TEST_HOST, base, "absent"));
+#endif
+    memset(long_home, 'x', sizeof(long_home) - 1);
+    long_home[sizeof(long_home) - 1] = '\0';
+    test_setenv("HOME", long_home);
+    rc += expect_int("overlong HOME category", RP2P_ERROR,
+        rp2p_deregister(client, TEST_HOST, base, "absent"));
+    test_setenv("HOME", test_home_path);
+
+    if (snprintf(blocked_home, sizeof(blocked_home), "%s/blocked-home",
+        test_home_path) < 0 || strlen(blocked_home) >= sizeof(blocked_home) ||
+        test_file_write(blocked_home, "blocked", 7) != 0)
+    {
+        rc++;
+        goto cleanup;
+    }
+    test_setenv("HOME", blocked_home);
+    if (test_publisher_start(&publisher, "nosave",
+        (unsigned short)(base + 1U), (unsigned short)(base + 7U)) != 0)
+        goto cleanup;
+    publisher_started = 1;
+    rc += expect_true("unwritable HOME publisher returns",
+        test_publisher_wait_result(&publisher, 3000U));
+    rc += expect_int("unwritable HOME publication fails", RP2P_ERROR,
+        publisher.result);
+    test_setenv("HOME", test_home_path);
+    test_publisher_finish(&publisher);
+    publisher_started = 0;
+    memset(&publishers, 0, sizeof(publishers));
+    rc += expect_int("list after save rollback", RP2P_OK,
+        rp2p_list_publishers(client, TEST_HOST,
+            (unsigned short)(base + 1U), test_on_publisher, &publishers));
+    rc += expect_true("save failure registration rolled back",
+        !test_has_publisher(&publishers, "nosave"));
+
+cleanup:
+    test_setenv("HOME", test_home_path);
+    if (publisher_started) test_publisher_stop(&publisher);
+    if (second_publisher_started) test_publisher_stop(&second_publisher);
+    if (first_publisher_started) test_publisher_stop(&first_publisher);
+    if (second_index_started) test_index_stop(&second_index);
+    if (first_index_started) test_index_stop(&first_index);
+    if (client) rp2p_close(client);
+#ifndef _WIN32
+    umask(old_umask);
+#endif
     return rc == 0 ? 0 : 1;
 }
 
@@ -1609,6 +3297,7 @@ static int case_rp2p_deregister(void) {
 static int case_rp2p_list_publishers(void) {
     test_index_t index;
     test_publisher_t publisher;
+    test_publisher_t replacement;
     test_publishers_t publishers;
     rp2p_t *client;
     unsigned short base;
@@ -1631,12 +3320,40 @@ static int case_rp2p_list_publishers(void) {
         (unsigned short)(base + 2U)) != 0) return 1;
     memset(&publishers, 0, sizeof(publishers));
     rc += expect_int("open client", RP2P_OK, rp2p_open(&client));
+    rc += expect_int("seed stale list detail", RP2P_EINVAL,
+        rp2p_set_protocol(client, 7));
     rc += expect_int("list publishers", RP2P_OK,
         rp2p_list_publishers(client, TEST_HOST, (unsigned short)(base + 1U),
             test_on_publisher, &publishers));
     rc += expect_true("publisher listed", test_has_publisher(&publishers, "listed"));
+    rc += expect_string("successful list clears detail", "",
+        rp2p_get_error(client));
     rp2p_close(client);
     test_publisher_stop(&publisher);
+    rc += expect_int("start original duplicate publisher", 0,
+        test_publisher_start(&publisher, "duplicate",
+            (unsigned short)(base + 1U), (unsigned short)(base + 3U)));
+    rc += expect_int("start replacement duplicate publisher", 0,
+        test_publisher_start(&replacement, "duplicate",
+            (unsigned short)(base + 1U), (unsigned short)(base + 4U)));
+    rc += expect_true("replacement duplicate remains active",
+        replacement.result == 999);
+    test_publisher_stop(&publisher);
+    memset(&publishers, 0, sizeof(publishers));
+    rc += expect_int("open duplicate list client", RP2P_OK,
+        rp2p_open(&client));
+    rc += expect_int("list after old duplicate disconnect", RP2P_OK,
+        rp2p_list_publishers(client, TEST_HOST,
+            (unsigned short)(base + 1U), test_on_publisher, &publishers));
+    rc += expect_true("new duplicate retains registration",
+        test_has_publisher(&publishers, "duplicate"));
+    rp2p_close(client);
+    test_publisher_stop(&replacement);
+    rc += expect_int("lookup after current publisher disconnect", 0,
+        test_control_request((unsigned short)(base + 1U),
+            (const unsigned char *)"RP2P_CTRTOK_LOOKUP:duplicate\n",
+            strlen("RP2P_CTRTOK_LOOKUP:duplicate\n"),
+            "RP2P_CTRTOK_NOT_FOUND"));
     test_index_stop(&index);
     return rc == 0 ? 0 : 1;
 }
@@ -1995,12 +3712,14 @@ int main(int argc, char **argv) {
         fprintf(stderr, "expected one test case argument\n");
         return 2;
     }
+    test_case_name = argv[1];
     if (test_home() != 0) return 1;
     if (test_socket_start() != 0) {
         test_home_cleanup();
         return 1;
     }
     rc = run_case(argv[1]);
+    test_port_base_release();
     test_socket_stop();
     if (test_home_cleanup() != 0 && rc == 0) rc = 1;
     return rc;

@@ -1,6 +1,6 @@
 # rp2p.c - RedP2P: Peer-to-peer service tunneling
 
-`rp2p.c` is a small and portable C library and CLI for creating direct peer-to-peer service tunnels. TCP mode uses a plaintext reliable stream, while UDP mode forwards plaintext datagrams. A minimal TCP index handles temporary registration, lookup, candidate exchange, and hole-punch coordination, while application data travels directly between peers over UDP.
+`rp2p.c` is a small and portable C library and CLI for creating direct peer-to-peer service tunnels. TCP mode uses vendored KCP as its internal plaintext reliable transport, while UDP mode forwards plaintext datagrams. A minimal TCP index handles temporary registration, lookup, candidate exchange, and hole-punch coordination, while application data travels directly between peers over UDP.
 
 ## CLI
 
@@ -175,13 +175,13 @@ The index control channel carries coordination and publisher-registration state 
 
 The inter-peer data channel is **UDP-based**.
 By default it tries direct UDP hole punching first.
-In `--tcp` mode, RP2P wraps that UDP path in an internal plaintext reliable stream so local TCP applications still see ordered, reconstructable, full-duplex byte semantics.
+In `--tcp` mode, RP2P runs vendored KCP over that UDP path so local TCP applications still see ordered, reconstructable, full-duplex byte semantics.
 RP2P transports application traffic without interpreting or modifying its security model. Applications and optional external components may provide authentication, authorization, encryption, and integrity when the operator requires them.
 The `--tcp` and `--udp` flags control how data enters and leaves the tunnel on each end:
 
 | Flag | Publisher side | Consumer side |
 | :--- | :--- | :--- |
-| `--tcp` | Connects to local TCP service → chunks into RP2P reliable stream frames → sends through UDP hole-punch tunnel | Receives RP2P reliable stream frames → reconstructs ordered byte stream → writes to local TCP client |
+| `--tcp` | Connects to local TCP service → queues bytes in KCP → sends through UDP hole-punch tunnel | Receives KCP datagrams → drains the reconstructed byte stream → writes to local TCP client |
 | `--udp` | Receives from local UDP service → sends each datagram through the hole-punch tunnel | Receives each peer datagram and forwards it to the local UDP client |
 
 `rp2p con` creates a local TCP or UDP listener on `127.0.0.1:<listen_port>`. This listener acts as a transparent bridge to the remote service.
@@ -260,7 +260,7 @@ rp2p_close(ctx);
 ## Wire Protocol
 
 Index control messages use plaintext TCP and carry coordination state rather than application payloads. Publisher-registration controls do not establish consumer or peer identity. The inter-peer data channel is UDP-based regardless of the `--tcp`/`--udp` flag.
-UDP is used only between peers for hole-punch probes, keepalives, and direct payload transport. In `--tcp` mode, application bytes are carried inside RP2P's own plaintext reliable stream frames over that UDP path.
+UDP is used only between peers for hole-punch probes, keepalives, and direct payload transport. In `--tcp` mode, application bytes are carried by vendored KCP inside a small RP2P session envelope over that UDP path.
 
 | Request | Response |
 | :--- | :--- |
@@ -279,27 +279,30 @@ UDP is used only between peers for hole-punch probes, keepalives, and direct pay
 
 In `--tcp` mode only, peers run an internal session protocol over the selected UDP endpoint after hole punching succeeds.
 
-- Each accepted local TCP client gets its own `session_id`.
-- Peers exchange plaintext `HELLO` frames before application data flows.
-- DATA and control frames are plaintext.
-- Ordering, retransmission, duplicate suppression, and stream reconstruction happen inside RP2P.
+- Each accepted local TCP client gets its own 128-bit RP2P `session_id` and independent KCP instance.
+- Peers exchange compact plaintext `HELLO` and `HELLO_ACK` envelopes before application data flows.
+- Every TCP tunnel datagram is classified by RP2P magic, transport version, packet type, role, protocol, and the full RP2P session ID before any KCP payload reaches `ikcp_input()`.
+- KCP handles segmentation, sequencing, acknowledgements, retransmission, receive ordering, windows, RTT estimation, RTO handling, and byte-stream reconstruction.
+- RP2P handles endpoint selection, session routing, UDP socket ownership, TCP bridging, liveness, reset, and orderly half-close around KCP.
+- The KCP conversation value is derived from the RP2P session ID but is not the session identity.
+- KCP uses a fixed internal stream-mode configuration: 1400-byte MTU, 64-packet send window, 128-packet receive window, 20 ms update interval, standard RTO mode, fast resend after two acknowledgements, and congestion control enabled.
+- KCP configuration is not exposed through the public API, CLI, or environment.
 - `--udp` mode preserves datagram boundaries and forwards plaintext datagrams.
 - UDP application payloads are limited to `1412` bytes for an IPv6-safe MTU of 1500. Oversized datagrams are rejected without truncation or RP2P fragmentation.
 - Zero-length UDP application datagrams are preserved.
-- UDP keepalives and TCP stream `PING` and `PONG` frames are plaintext.
+- UDP and TCP tunnel keepalives are plaintext.
 
-Internal TCP stream frame types:
+Internal RP2P TCP envelope types:
 
 - `HELLO`
 - `HELLO_ACK`
-- `DATA`
-- `ACK`
-- `SACK`
-- `FIN`
-- `FIN_ACK`
+- `KCP`
+- `CLOSE`
+- `CLOSE_ACK`
 - `RESET`
-- `PING`
-- `PONG`
+- `KEEPALIVE`
+
+The envelope does not duplicate KCP sequence, acknowledgement, window, RTT, RTO, retransmission, or fragmentation state. Orderly local EOF waits for queued KCP bytes to be acknowledged before RP2P sends an idempotent `CLOSE`; `CLOSE_ACK` and `RESET` remain tunnel-lifecycle controls rather than a second reliable transport.
 
 The deregistration key is generated by the index automatically and stored locally by the announcing host. The user never sets it manually.
 
@@ -345,8 +348,8 @@ RP2P_PASS='global' RP2P_VIP='web webpass admin adminpass' rp2p idx 9876
 Internal debug-only environment knobs used for fault-injection tests:
 
 - `RP2P_DEBUG_STREAM=1` enables detailed stream logs.
-- `RP2P_DEBUG_STREAM_DROP_EVERY=N` drops every Nth TCP stream DATA frame once.
-- `RP2P_DEBUG_STREAM_REORDER_EVERY=N` delays every Nth TCP stream DATA frame once so the next frame arrives first.
+- `RP2P_DEBUG_STREAM_DROP_EVERY=N` drops every Nth complete outgoing KCP datagram.
+- `RP2P_DEBUG_STREAM_REORDER_EVERY=N` delays every Nth complete outgoing KCP datagram so the next datagram arrives first.
 
 Index addresses and local ports are always explicit CLI arguments. `RP2P_INDEX` and `RP2P_BIND` are not supported.
 
@@ -390,7 +393,7 @@ rp2p_set_pass(ctx, "password");
 - The index does not relay application traffic.
 - The index remains suitable for modest VPS instances, home systems, community infrastructure, and other low-resource deployments.
 - The inter-peer transport is UDP-based and stays peer-to-peer.
-- `--tcp` uses an internal plaintext reliable stream over UDP. The local service still communicates over TCP, while RP2P handles ordering, retransmission, and reconstruction inside the tunnel.
+- `--tcp` uses vendored KCP as its internal plaintext reliable transport over UDP. The local service still communicates over TCP, while KCP handles ordering, retransmission, and reconstruction inside the tunnel.
 - `set --tcp <port>` connects to a real local TCP backend on `127.0.0.1:<port>`.
 - `con --tcp <port>` exposes a local TCP listener on `127.0.0.1:<port>`.
 - Each accepted local TCP client creates a separate peer session.
@@ -514,3 +517,8 @@ If you'd like to reach out, you can send an email to kaisar@kaisarcode.com. Plea
 [![GPLv3](https://www.gnu.org/graphics/gplv3-127x51.png)](https://www.gnu.org/licenses/gpl-3.0.html)
 
 This project is distributed under the **GNU General Public License version 3 (GPLv3)**.
+
+Vendored third-party source retains its own license:
+
+- KCP, Copyright (c) 2017 Lin Wei, is distributed under the MIT License in `lib/kcp/LICENSE`.
+- Monocypher is distributed under BSD-2-Clause or CC0-1.0 terms in `lib/monocypher/LICENSE`.

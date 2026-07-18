@@ -31,6 +31,7 @@ endif()
 set(RP2P_SOURCES
     src/librp2p.c
     lib/monocypher/monocypher.c
+    lib/kcp/ikcp.c
 )
 
 set_source_files_properties(src/librp2p.c PROPERTIES
@@ -40,12 +41,12 @@ set_source_files_properties(src/librp2p.c PROPERTIES
 if(NOT RP2P_TEST_EXTERNAL_ARTIFACTS)
     add_library(rp2p_shared SHARED ${RP2P_SOURCES})
     set_target_properties(rp2p_shared PROPERTIES OUTPUT_NAME "rp2p")
-    target_include_directories(rp2p_shared PRIVATE src lib/monocypher)
+    target_include_directories(rp2p_shared PRIVATE src lib/monocypher lib/kcp)
 
     # Static library
     add_library(rp2p_static STATIC ${RP2P_SOURCES})
     set_target_properties(rp2p_static PROPERTIES OUTPUT_NAME "rp2p")
-    target_include_directories(rp2p_static PRIVATE src lib/monocypher)
+    target_include_directories(rp2p_static PRIVATE src lib/monocypher lib/kcp)
 
     # Binary: rp2p
     if(APPLE)
@@ -54,7 +55,7 @@ if(NOT RP2P_TEST_EXTERNAL_ARTIFACTS)
         add_executable(rp2p src/rp2p.c)
         target_link_libraries(rp2p PRIVATE rp2p_static)
     endif()
-    target_include_directories(rp2p PRIVATE src lib/monocypher)
+    target_include_directories(rp2p PRIVATE src lib/monocypher lib/kcp)
 
     if(UNIX AND NOT ANDROID AND NOT APPLE)
         target_link_libraries(rp2p_shared pthread m)

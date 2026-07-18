@@ -2687,7 +2687,7 @@ static int test_tcp_stream_coverage(unsigned short port, test_tcp_echo_t *echo) 
         test_tcp_pattern(large, TEST_TCP_LARGE_SIZE, 7U);
         if (fault_env_ready)
             rc += expect_int(
-                "TCP drop/reorder recovery beyond 64-frame window",
+                "TCP KCP datagram drop/reorder recovery",
                 (int)TEST_TCP_LARGE_SIZE,
                 test_tcp_roundtrip(port, large, TEST_TCP_LARGE_SIZE));
     }

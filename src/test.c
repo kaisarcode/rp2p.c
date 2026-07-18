@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <stdatomic.h>
 
 #ifdef _WIN32
 #include <process.h>
@@ -53,7 +54,7 @@ typedef socklen_t test_socklen_t;
 typedef struct {
     rp2p_t *ctx;
     unsigned short port;
-    volatile int result;
+    int result;
     test_thread_t thread;
 } test_index_t;
 
@@ -66,7 +67,7 @@ typedef struct {
     int protocol;
     const char *pass;
     const char *secret;
-    volatile int result;
+    _Atomic int result;
     test_thread_t thread;
 } test_publisher_t;
 
@@ -79,14 +80,14 @@ typedef struct {
     unsigned short bind_port;
     int protocol;
     const char *secret;
-    volatile int result;
+    _Atomic int result;
     test_thread_t thread;
 } test_consumer_t;
 
 typedef struct {
     test_socket_t fd;
     unsigned short port;
-    volatile int stop;
+    _Atomic int stop;
     test_thread_t thread;
 } test_udp_echo_t;
 
@@ -94,7 +95,7 @@ typedef struct {
     test_socket_t fd;
     test_socket_t clients[TEST_TCP_CLIENTS];
     unsigned short port;
-    volatile int stop;
+    _Atomic int stop;
     test_thread_t thread;
 } test_tcp_echo_t;
 
@@ -824,7 +825,7 @@ static int test_wait_publisher_ready(test_publisher_t *publisher) {
         return 1;
     observed = 0;
     for (elapsed = 0; elapsed < 2000U; elapsed += 20U) {
-        if (publisher->result != 999) return 0;
+        if (atomic_load(&publisher->result) != 999) return 0;
         if (test_control_request(publisher->index_port,
             (const unsigned char *)request, (size_t)request_len,
             expected) == 0) {
@@ -836,7 +837,8 @@ static int test_wait_publisher_ready(test_publisher_t *publisher) {
         test_sleep_ms(20U);
     }
     fprintf(stderr, "publisher %s startup timed out: result=%d error=%s\n",
-        publisher->id, publisher->result, rp2p_get_error(publisher->ctx));
+        publisher->id, atomic_load(&publisher->result),
+        rp2p_get_error(publisher->ctx));
     return 1;
 }
 
@@ -872,11 +874,12 @@ static int test_wait_consumer_ready(test_consumer_t *consumer) {
 
     for (elapsed = 0; elapsed < 2000U; elapsed += 20U) {
         if (test_port_open(consumer->bind_port)) return 0;
-        if (consumer->result != 999) break;
+        if (atomic_load(&consumer->result) != 999) break;
         test_sleep_ms(20U);
     }
     fprintf(stderr, "consumer %s startup failed: result=%d error=%s\n",
-        consumer->self_id, consumer->result, rp2p_get_error(consumer->ctx));
+        consumer->self_id, atomic_load(&consumer->result),
+        rp2p_get_error(consumer->ctx));
     return 1;
 }
 
@@ -948,7 +951,7 @@ static void test_udp_echo_run(void *arg) {
     unsigned char buf[2048];
 
     echo = (test_udp_echo_t *)arg;
-    while (!echo->stop) {
+    while (!atomic_load(&echo->stop)) {
         struct sockaddr_storage from;
         test_socklen_t from_len;
         int n;
@@ -972,7 +975,7 @@ static void test_tcp_echo_run(void *arg) {
     unsigned int i;
 
     echo = (test_tcp_echo_t *)arg;
-    while (!echo->stop) {
+    while (!atomic_load(&echo->stop)) {
         fd_set readable;
         struct timeval timeout;
         int max_fd;
@@ -1108,8 +1111,9 @@ static DWORD WINAPI test_publisher_main(void *arg) {
     if (publisher->pass != NULL) rp2p_set_pass(publisher->ctx, publisher->pass);
     if (publisher->secret != NULL)
         rp2p_set_secret(publisher->ctx, publisher->secret);
-    publisher->result = rp2p_wait(publisher->ctx, publisher->host,
-        publisher->index_port, publisher->id, publisher->bind_port);
+    atomic_store(&publisher->result,
+        rp2p_wait(publisher->ctx, publisher->host, publisher->index_port,
+            publisher->id, publisher->bind_port));
     return 0;
 }
 
@@ -1126,9 +1130,9 @@ static DWORD WINAPI test_consumer_main(void *arg) {
     rp2p_set_port(consumer->ctx, consumer->bind_port);
     if (consumer->secret != NULL)
         rp2p_set_secret(consumer->ctx, consumer->secret);
-    consumer->result = rp2p_connect(consumer->ctx, consumer->host,
-        consumer->index_port, consumer->self_id, consumer->target_id,
-        consumer->bind_port);
+    atomic_store(&consumer->result,
+        rp2p_connect(consumer->ctx, consumer->host, consumer->index_port,
+            consumer->self_id, consumer->target_id, consumer->bind_port));
     return 0;
 }
 
@@ -1189,8 +1193,9 @@ static void *test_publisher_main(void *arg) {
     if (publisher->pass != NULL) rp2p_set_pass(publisher->ctx, publisher->pass);
     if (publisher->secret != NULL)
         rp2p_set_secret(publisher->ctx, publisher->secret);
-    publisher->result = rp2p_wait(publisher->ctx, publisher->host,
-        publisher->index_port, publisher->id, publisher->bind_port);
+    atomic_store(&publisher->result,
+        rp2p_wait(publisher->ctx, publisher->host, publisher->index_port,
+            publisher->id, publisher->bind_port));
     return NULL;
 }
 
@@ -1207,9 +1212,9 @@ static void *test_consumer_main(void *arg) {
     rp2p_set_port(consumer->ctx, consumer->bind_port);
     if (consumer->secret != NULL)
         rp2p_set_secret(consumer->ctx, consumer->secret);
-    consumer->result = rp2p_connect(consumer->ctx, consumer->host,
-        consumer->index_port, consumer->self_id, consumer->target_id,
-        consumer->bind_port);
+    atomic_store(&consumer->result,
+        rp2p_connect(consumer->ctx, consumer->host, consumer->index_port,
+            consumer->self_id, consumer->target_id, consumer->bind_port));
     return NULL;
 }
 
@@ -1355,7 +1360,7 @@ unsigned short index_port, unsigned short bind_port)
     publisher->id = id;
     publisher->bind_port = bind_port;
     publisher->protocol = RP2P_PROTO_TCP;
-    publisher->result = 999;
+    atomic_init(&publisher->result, 999);
     if (rp2p_open(&publisher->ctx) != RP2P_OK) return 1;
     if (test_thread_start(&publisher->thread, test_publisher_main,
         publisher) != 0) return 1;
@@ -1382,7 +1387,7 @@ static int test_publisher_start_pass(test_publisher_t *publisher,
     publisher->bind_port = bind_port;
     publisher->protocol = RP2P_PROTO_TCP;
     publisher->pass = pass;
-    publisher->result = 999;
+    atomic_init(&publisher->result, 999);
     if (rp2p_open(&publisher->ctx) != RP2P_OK) return 1;
     if (test_thread_start(&publisher->thread, test_publisher_main,
         publisher) != 0)
@@ -1430,10 +1435,10 @@ static int test_publisher_wait_result(test_publisher_t *publisher,
     unsigned int elapsed;
 
     for (elapsed = 0; elapsed < timeout_ms; elapsed += 50U) {
-        if (publisher->result != 999) return 1;
+        if (atomic_load(&publisher->result) != 999) return 1;
         test_sleep_ms(50U);
     }
-    return publisher->result != 999;
+    return atomic_load(&publisher->result) != 999;
 }
 
 /**
@@ -1451,7 +1456,7 @@ static int test_udp_publisher_start(test_publisher_t *publisher,
     publisher->bind_port = bind_port;
     publisher->protocol = RP2P_PROTO_UDP;
     publisher->secret = secret;
-    publisher->result = 999;
+    atomic_init(&publisher->result, 999);
     if (rp2p_open(&publisher->ctx) != RP2P_OK) return 1;
     if (test_thread_start(&publisher->thread, test_publisher_main,
         publisher) != 0)
@@ -1475,7 +1480,7 @@ static int test_udp_consumer_start(test_consumer_t *consumer,
     consumer->bind_port = bind_port;
     consumer->protocol = RP2P_PROTO_UDP;
     consumer->secret = secret;
-    consumer->result = 999;
+    atomic_init(&consumer->result, 999);
     if (rp2p_open(&consumer->ctx) != RP2P_OK) return 1;
     if (test_thread_start(&consumer->thread, test_consumer_main,
         consumer) != 0)
@@ -1520,6 +1525,7 @@ static int test_udp_echo_start(test_udp_echo_t *echo, unsigned short port) {
     struct sockaddr_in addr;
 
     memset(echo, 0, sizeof(*echo));
+    atomic_init(&echo->stop, 0);
     echo->port = port;
     echo->fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (echo->fd == TEST_SOCKET_INVALID) return 1;
@@ -1543,7 +1549,7 @@ static int test_udp_echo_stop(test_udp_echo_t *echo) {
     struct sockaddr_in addr;
     test_socket_t fd;
 
-    echo->stop = 1;
+    atomic_store(&echo->stop, 1);
     fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd != TEST_SOCKET_INVALID) {
         memset(&addr, 0, sizeof(addr));
@@ -1569,6 +1575,7 @@ static int test_tcp_echo_start(test_tcp_echo_t *echo, unsigned short port) {
     int reuse;
 
     memset(echo, 0, sizeof(*echo));
+    atomic_init(&echo->stop, 0);
     echo->port = port;
     for (i = 0; i < TEST_TCP_CLIENTS; i++)
         echo->clients[i] = TEST_SOCKET_INVALID;
@@ -1596,7 +1603,7 @@ static int test_tcp_echo_start(test_tcp_echo_t *echo, unsigned short port) {
  * @return 0 on success.
  */
 static int test_tcp_echo_stop(test_tcp_echo_t *echo) {
-    echo->stop = 1;
+    atomic_store(&echo->stop, 1);
     test_socket_shutdown(echo->fd);
     test_thread_join(echo->thread);
     test_socket_close(echo->fd);
@@ -1666,7 +1673,7 @@ static int test_tcp_publisher_start(test_publisher_t *publisher,
     publisher->bind_port = bind_port;
     publisher->protocol = RP2P_PROTO_TCP;
     publisher->secret = secret;
-    publisher->result = 999;
+    atomic_init(&publisher->result, 999);
     if (rp2p_open(&publisher->ctx) != RP2P_OK) return 1;
     if (test_thread_start(&publisher->thread, test_publisher_main,
         publisher) != 0)
@@ -1690,7 +1697,7 @@ static int test_tcp_consumer_start(test_consumer_t *consumer,
     consumer->bind_port = bind_port;
     consumer->protocol = RP2P_PROTO_TCP;
     consumer->secret = secret;
-    consumer->result = 999;
+    atomic_init(&consumer->result, 999);
     if (rp2p_open(&consumer->ctx) != RP2P_OK) return 1;
     if (test_thread_start(&consumer->thread, test_consumer_main,
         consumer) != 0)
@@ -2472,14 +2479,14 @@ static int case_rp2p_serve_index(void) {
         test_publisher_start(&first, "capone", port,
             (unsigned short)(port + 20U)));
     rc += expect_true("first capacity publisher active",
-        first.result == 999);
+        atomic_load(&first.result) == 999);
     rc += expect_int("start over-capacity publisher", 0,
         test_publisher_start(&second, "captwo", port,
             (unsigned short)(port + 21U)));
     rc += expect_true("capacity reached is reported",
         test_publisher_wait_result(&second, 2000U));
     rc += expect_int("capacity rejection category", RP2P_EFULL,
-        second.result);
+        atomic_load(&second.result));
     rc += expect_true("capacity rejection detail",
         strstr(rp2p_get_error(second.ctx), "full") != NULL);
     test_publisher_finish(&second);
@@ -2492,7 +2499,8 @@ static int case_rp2p_serve_index(void) {
     rc += expect_int("start publisher after capacity release", 0,
         test_publisher_start(&third, "capthree", port,
             (unsigned short)(port + 22U)));
-    rc += expect_true("released capacity is reusable", third.result == 999);
+    rc += expect_true("released capacity is reusable",
+        atomic_load(&third.result) == 999);
     test_publisher_stop(&third);
     test_index_stop(&index);
 
@@ -2506,15 +2514,17 @@ static int case_rp2p_serve_index(void) {
     rc += expect_int("start available non-VIP publisher", 0,
         test_publisher_start_pass(&second, "regular", port,
             (unsigned short)(port + 21U), "globalpass"));
-    rc += expect_true("VIP reserved seat active", first.result == 999);
-    rc += expect_true("non-VIP capacity active", second.result == 999);
+    rc += expect_true("VIP reserved seat active",
+        atomic_load(&first.result) == 999);
+    rc += expect_true("non-VIP capacity active",
+        atomic_load(&second.result) == 999);
     rc += expect_int("start excess non-VIP publisher", 0,
         test_publisher_start_pass(&third, "excess", port,
             (unsigned short)(port + 22U), "globalpass"));
     rc += expect_true("VIP reservation limits non-VIP seats",
         test_publisher_wait_result(&third, 2000U));
     rc += expect_int("reserved capacity rejection category", RP2P_EFULL,
-        third.result);
+        atomic_load(&third.result));
     test_publisher_finish(&third);
     rc += expect_int("start wrong-password VIP publisher", 0,
         test_publisher_start_pass(&third, "vip", port,
@@ -2522,7 +2532,7 @@ static int case_rp2p_serve_index(void) {
     rc += expect_true("wrong-password VIP publisher returns",
         test_publisher_wait_result(&third, 2000U));
     rc += expect_int("registration mismatch category", RP2P_EAUTH,
-        third.result);
+        atomic_load(&third.result));
     rc += expect_true("registration mismatch detail",
         strstr(rp2p_get_error(third.ctx), "authentication") != NULL);
     test_publisher_finish(&third);
@@ -2559,12 +2569,13 @@ static int case_rp2p_wait(void) {
     if (test_index_start(&index, (unsigned short)(base + 2U)) != 0) return 1;
     if (test_publisher_start(&publisher, "waitpub", (unsigned short)(base + 2U),
         (unsigned short)(base + 3U)) != 0) return 1;
-    rc += expect_true("publisher remains running", publisher.result == 999);
+    rc += expect_true("publisher remains running",
+        atomic_load(&publisher.result) == 999);
     test_index_stop(&index);
     rc += expect_true("publisher exits after index stop",
         test_publisher_wait_result(&publisher, 3000U));
     rc += expect_int("index loss publisher category", RP2P_ENET,
-        publisher.result);
+        atomic_load(&publisher.result));
     rc += expect_true("index loss publisher detail",
         strstr(rp2p_get_error(publisher.ctx), "control") != NULL);
     test_publisher_finish(&publisher);
@@ -2681,8 +2692,9 @@ static int test_udp_tunnel_case(const char *publisher_secret,
         if (small_result < 0)
             fprintf(stderr,
                 "consumer result: %d error: %s\npublisher result: %d error: %s\n",
-                consumer.result, rp2p_get_error(consumer.ctx),
-                publisher.result, rp2p_get_error(publisher.ctx));
+                atomic_load(&consumer.result), rp2p_get_error(consumer.ctx),
+                atomic_load(&publisher.result),
+                rp2p_get_error(publisher.ctx));
         rc += expect_int("UDP empty datagram", 0,
             test_udp_roundtrip((unsigned short)(base + 2U), payload, 0, 3000U));
         if (test_limits) {
@@ -3265,7 +3277,7 @@ static int case_rp2p_deregister(void) {
     rc += expect_true("unwritable HOME publisher returns",
         test_publisher_wait_result(&publisher, 3000U));
     rc += expect_int("unwritable HOME publication fails", RP2P_ERROR,
-        publisher.result);
+        atomic_load(&publisher.result));
     test_setenv("HOME", test_home_path);
     test_publisher_finish(&publisher);
     publisher_started = 0;
@@ -3337,7 +3349,7 @@ static int case_rp2p_list_publishers(void) {
         test_publisher_start(&replacement, "duplicate",
             (unsigned short)(base + 1U), (unsigned short)(base + 4U)));
     rc += expect_true("replacement duplicate remains active",
-        replacement.result == 999);
+        atomic_load(&replacement.result) == 999);
     test_publisher_stop(&publisher);
     memset(&publishers, 0, sizeof(publishers));
     rc += expect_int("open duplicate list client", RP2P_OK,

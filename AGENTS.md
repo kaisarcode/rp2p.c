@@ -61,12 +61,13 @@ The following invariants must be preserved unless the project owner explicitly i
 * no global identity system is introduced
 * no user account system is introduced
 * index state remains temporary
-* persistent storage is not required
-* resource use remains bounded
+* the index requires no persistent database
+* publisher deregistration keys remain local, scoped, minimal persistent state
+* protocol fields, candidate sets, pending punches, proof challenges, and index publisher capacity remain bounded
 * the project remains usable on modest hardware
 * the code remains inspectable by one person
 
-The absence of relay, accounts, persistent identity, telemetry, and enterprise control infrastructure is intentional.
+The absence of relay, accounts, persistent identity, telemetry, and enterprise control infrastructure is intentional. The local registration key files used by `set` and `del` are a narrow operational exception, not an index database or identity system.
 
 These are not missing features.
 
@@ -122,6 +123,24 @@ Do not move the following into RP2P without explicit instruction:
 * application persistence
 
 Prefer composition with another small tool over absorbing unrelated responsibilities.
+
+## Local Key State
+
+Successful publisher registration stores one index-host, index-port, and publisher-scoped deregistration key below `$HOME/.local/share/rp2p/keys/`. The key authorizes later deregistration; it does not identify a user or authenticate application traffic.
+
+Preserve these properties:
+
+* key files remain local to the operator
+* scoped filenames do not expose the index or publisher text
+* POSIX key files remain mode `0600`
+* writes remain temporary-file replacements with durability checks
+* reads reject malformed files, non-regular files, and links where the platform permits
+* failed publication key storage rolls back index registration
+* failed deregistration preserves the key for retry
+* successful deregistration removes only the key value that was actually used
+* legacy identifier-named keys remain read-only migration input
+
+Do not expand this narrow state into accounts, identity stores, history, synchronization, remote custody, or a general persistence layer.
 
 ## Change Evaluation
 
@@ -180,6 +199,19 @@ Avoid:
 * large dependency additions
 * framework-style internal architecture
 * callbacks or interfaces with only one hypothetical future implementation
+
+Session and control-connection tables currently grow with active local work and are ultimately constrained by descriptors and `select()` representation rather than one fixed application-level session maximum. Do not claim every allocation has a strict static bound. Prefer explicit limits when changing these paths, and never add unbounded queues or retained history.
+
+## Source Layout
+
+Preserve the existing four-file `src/` layout:
+
+* `src/rp2p.c` owns CLI parsing, environment precedence, messages, and process exit behavior.
+* `src/librp2p.c` owns reusable protocol, socket, persistence, punching, and transport behavior.
+* `src/librp2p.h` is the public API, limits, result codes, and ownership contract.
+* `src/test.c` contains all tests.
+
+Extend these files rather than creating additional source, header, or test files. Keep vendored KCP and Monocypher under `lib/`; do not fork their responsibilities into new project source units.
 
 ## Protocol Changes
 

@@ -90,18 +90,19 @@ RP2P attempts to establish a direct UDP path between peers.
 
 Candidate sources may include:
 
-* local host endpoints
-* LAN endpoints
-* observed public endpoints
-* optional STUN-discovered endpoints
-* peer-reflexive endpoints
-* bounded predicted or swept ports
+* the UDP socket's loopback endpoint
+* one LAN endpoint selected by the local IPv4 route
+* an optional IPv4 STUN-discovered endpoint
 
 STUN is optional.
 
 STUN is used only to discover an externally visible endpoint. It does not carry application traffic and does not become part of an established tunnel.
 
 RP2P does not implement TURN or any equivalent application traffic relay.
+
+The current control protocol accepts only `host`, `lan`, `public`, and `srflx` candidate records. It validates literal IPv4 or IPv6 addresses, removes duplicate endpoints, recomputes local priority, and attempts candidates in deterministic priority order. The implementation does not currently generate `public`, peer-reflexive, predicted, or proxy candidate records.
+
+When enabled, the bounded sweep probes neighboring IPv4 ports only around received `public` or `srflx` candidates. It is a direct-punch fallback, not a candidate service or relay.
 
 When a direct path cannot be established, the session may fail.
 
@@ -158,6 +159,10 @@ The index stores only the state required to coordinate active publishers and pen
 
 It must not become a permanent source of truth.
 
+Publisher registration creates one narrow piece of local persistent state: a deregistration key under `$HOME/.local/share/rp2p/keys/`. Its filename is a SHA-256 scope over the index host, index port, and publisher ID. The key is written through a private temporary file, stored as mode `0600` on POSIX, and removed after successful deregistration. A publisher rolls back registration if the key cannot be stored.
+
+The key authorizes `del` for one registration scope. It is not user identity, peer identity, application authentication, or durable index state. A legacy identifier-named key may be read for migration, but new keys use scoped hashed filenames.
+
 The design should prefer:
 
 * bounded tables
@@ -166,7 +171,7 @@ The design should prefer:
 * automatic stale-state removal
 * clean failure when capacity is exhausted
 
-Persistent storage is outside the project scope.
+Databases, synchronized key stores, registration history, and persistent index state are outside the project scope.
 
 ## Composition
 
@@ -201,9 +206,8 @@ The project must remain suitable for modest systems.
 
 Design choices should prefer:
 
-* bounded memory
-* bounded pending work
-* bounded protocol fields
+* bounded protocol fields and datagrams
+* bounded candidate, pending-punch, proof-challenge, and publisher tables
 * bounded candidate lists
 * bounded port sweeps
 * explicit socket ownership
@@ -211,7 +215,7 @@ Design choices should prefer:
 * limited background threads
 * no mandatory external services
 
-Unbounded queues, hidden persistent state, and infrastructure-dependent behavior should be rejected.
+Active publisher and consumer session arrays and index control-connection storage grow with live descriptors and are constrained by `select()` representation rather than one fixed session count. They do not retain completed work. Unbounded queues, hidden history, and infrastructure-dependent behavior should be rejected.
 
 ## Inspectability
 
@@ -277,7 +281,8 @@ The following properties define the project:
 * no TURN-style relay is provided
 * application security remains external
 * index state remains temporary
-* resource use remains bounded
+* local persisted state is limited to scoped deregistration keys
+* protocol and coordination resource limits remain explicit
 * the implementation remains small and inspectable
 * local operation does not require accounts or subscriptions
 

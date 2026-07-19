@@ -23,6 +23,28 @@ Do not interpret the project as an incomplete enterprise networking platform.
 
 Read `README.md` for usage and `DESIGN.md` for architectural boundaries before modifying the project.
 
+## Motivation
+
+RP2P exists because small, independently operated systems are poorly served by software designed around enterprise infrastructure, managed cloud services, permanent external dependencies, and recurring payments.
+
+The project owner is also its primary operator, integrator, and maintainer. Intended deployments are concrete and modest: neighborhood businesses, social clubs, community projects, groups of friends, personal infrastructure, small game servers, local media, kiosks, workshops, and similar systems.
+
+The index must remain simple enough to run wherever an accessible address is available, including an inexpensive VPS, a home system, a single-board computer, or a smartphone. It coordinates peers but does not carry application traffic.
+
+RP2P provides one reusable connectivity component: peer coordination and direct TCP or UDP service tunneling.
+
+Applications built on top of RP2P define their own users, authentication, authorization, encryption, persistence, discovery, data models, business rules, and trust relationships. These responsibilities vary by implementation and remain outside RP2P.
+
+Their absence is not unfinished work.
+
+Do not evaluate RP2P as a smaller version of an enterprise networking platform. Enterprise platforms, hosted control planes, relays, identity systems, telemetry, centralized administration, and generalized infrastructure already exist elsewhere.
+
+RP2P addresses a different need: software that one person can understand, deploy, operate, and maintain with limited hardware, limited money, and limited complexity.
+
+When evaluating a change, ask whether it is required for direct peer coordination or transport in an existing small-scale use case. Do not add generalized functionality for hypothetical deployments or future consumers.
+
+Unrequested generalization is architectural drift. When implementation-specific functionality is needed, build or compose it outside RP2P.
+
 ## Required Mindset
 
 Do not optimize the project toward:

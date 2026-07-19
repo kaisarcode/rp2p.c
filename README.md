@@ -6,6 +6,10 @@ A temporary TCP index coordinates registration, lookup, candidate exchange, and 
 
 TCP services are transported through vendored KCP over the direct UDP path. UDP services preserve datagram boundaries.
 
+RP2P is intended for small, independently operated systems that need direct connectivity without depending on managed cloud infrastructure, permanent hosted services, or recurring payments. Application-specific concerns such as users, authentication, authorization, encryption, persistence, and business rules remain outside the library.
+
+See `DESIGN.md` for the project motivation, architectural boundaries, and non-goals.
+
 ---
 
 ## CLI

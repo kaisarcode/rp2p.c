@@ -1,5 +1,25 @@
 # rp2p.c Design
 
+## Motivation
+
+Modern networking software is commonly designed around managed cloud infrastructure, permanent hosted services, large organizations, and recurring operational payments. Those systems already have many mature tools available to them.
+
+RP2P is intended for a different operating model.
+
+Its users may be a neighborhood business, a social club, a community project, a group of friends, or one person operating personal infrastructure. They may need mobile and desktop applications to exchange data, expose a local service, interconnect a small user base, or run a game server without sharing a LAN or paying for a permanent traffic relay.
+
+The project owner is also the operator and integrator. Deployments are known, concrete, and small. RP2P therefore does not need to anticipate every authentication model, trust relationship, storage design, or business rule that a future platform might require.
+
+The only shared problem RP2P solves is connectivity: coordinating peers and transporting TCP streams or UDP datagrams directly between them.
+
+Application-specific concerns remain with the application using the component. A club, business, game, or community system may define its own users, authentication, authorization, encryption, persistence, discovery, and trust model without forcing those choices into every other RP2P deployment.
+
+This separation also preserves the project's economic and operational model. Because application traffic does not pass through the index, an index can remain inexpensive and replaceable. It may run on a modest VPS, a home system, a single-board computer, or even a smartphone whenever an accessible public address is available.
+
+Small scale is not a temporary stage before enterprise growth. It is the intended destination. Limited resource use, low operational cost, direct ownership, and code that one person can inspect are product requirements.
+
+Features must not be added merely because they are common in commercial networking platforms or might be useful someday. Functionality that belongs to one implementation should be built or composed outside RP2P.
+
 ## Purpose
 
 `rp2p.c` is a small tunneling primitive for independently operated systems.

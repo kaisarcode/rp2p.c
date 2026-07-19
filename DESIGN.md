@@ -239,13 +239,32 @@ Active publisher and consumer session arrays and index control-connection storag
 
 ## Inspectability
 
-One person should be able to understand the complete connection path without learning a large framework.
+One person should be able to understand the complete connection path without learning a framework or navigating a distributed internal architecture.
 
-The implementation may be divided into internal units when that improves correctness, but it must not become a generic networking framework.
+The implementation intentionally keeps reusable library behavior in one compilation unit: `src/librp2p.c`.
 
-Internal abstractions must correspond to concrete protocol or platform responsibilities.
+This single-file structure is part of the kclib maintenance model. It keeps internal helpers `static`, avoids private cross-unit contracts, preserves local visibility of state and ownership, and allows the complete implementation path to be inspected in one place.
 
-Generic extensibility is not a goal.
+A large source file is not considered a design defect by itself. Line count, including a file size of several thousand lines, is not sufficient justification for modularization.
+
+Inspectability is provided through:
+
+* clear implementation sections
+* concrete function names
+* small static helpers
+* explicit state transitions
+* visible ownership and cleanup
+* direct control flow
+* removal of obsolete code
+* avoidance of generic internal frameworks
+
+The project must not introduce private headers, internal visibility annotations, or additional implementation units solely to distribute code across files.
+
+Splitting index, peer coordination, punching, persistence, or tunnel transport into separate compilation units would require internal contracts between responsibilities that intentionally share state and primitives. Such a split is not an architectural improvement unless the project owner explicitly defines and requests the new boundary.
+
+Internal organization should improve the single implementation file rather than replace it with a module graph.
+
+Generic extensibility remains outside the project goals.
 
 ## Non-goals
 
@@ -285,6 +304,7 @@ A proposed change should be evaluated with the following questions:
 8. Does it preserve direct peer-to-peer application traffic?
 9. Does it preserve bounded resource use?
 10. Is the added complexity justified by an existing use case?
+11. Does it preserve the intentional single-file kclib implementation model?
 
 Changes justified mainly by hypothetical future scale, enterprise readiness, platform growth, managed operation, or ecosystem expectations should be rejected.
 
@@ -304,6 +324,7 @@ The following properties define the project:
 * local persisted state is limited to scoped deregistration keys
 * protocol and coordination resource limits remain explicit
 * the implementation remains small and inspectable
+* reusable library behavior remains in the single `src/librp2p.c` implementation unit unless the project owner explicitly changes the source-layout contract
 * local operation does not require accounts or subscriptions
 
 These constraints define the product.

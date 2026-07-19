@@ -123,6 +123,7 @@ Do not recommend or implement the following unless explicitly requested:
 * Kubernetes integration
 * enterprise observability stacks
 * automatic update infrastructure
+* splitting `src/librp2p.c` or introducing private implementation modules because of file size
 
 Do not justify changes through enterprise readiness, market growth, adoption, or hypothetical future scale.
 
@@ -221,6 +222,10 @@ Avoid:
 * large dependency additions
 * framework-style internal architecture
 * callbacks or interfaces with only one hypothetical future implementation
+* private cross-unit APIs
+* internal symbol visibility macros
+* modularization motivated only by line count
+* additional compilation units for tightly coupled implementation details
 
 Session and control-connection tables currently grow with active local work and are ultimately constrained by descriptors and `select()` representation rather than one fixed application-level session maximum. Do not claim every allocation has a strict static bound. Prefer explicit limits when changing these paths, and never add unbounded queues or retained history.
 
@@ -229,11 +234,35 @@ Session and control-connection tables currently grow with active local work and 
 Preserve the existing four-file `src/` layout:
 
 * `src/rp2p.c` owns CLI parsing, environment precedence, messages, and process exit behavior.
-* `src/librp2p.c` owns reusable protocol, socket, persistence, punching, and transport behavior.
-* `src/librp2p.h` is the public API, limits, result codes, and ownership contract.
-* `src/test.c` contains all tests.
+* `src/librp2p.c` owns all reusable protocol, socket, persistence, punching, index, peer coordination, and transport behavior.
+* `src/librp2p.h` is the only library header and defines the public API, limits, result codes, and ownership contract.
+* `src/test.c` contains all project tests.
 
-Extend these files rather than creating additional source, header, or test files. Keep vendored KCP and Monocypher under `lib/`; do not fork their responsibilities into new project source units.
+The single-file implementation of `src/librp2p.c` is an intentional project-wide kclib convention, not a temporary limitation or a refactoring opportunity.
+
+Do not recommend, request, or implement splitting `src/librp2p.c` merely because of its line count, number of internal responsibilities, or perceived maintainability. File size alone is not considered a defect in this project, including when the file exceeds several thousand lines.
+
+Do not create:
+
+* private project headers
+* additional implementation units
+* `internal.h`, `core.h`, `common.h`, or similar headers
+* internal visibility macros
+* cross-unit private APIs
+* source subdirectories for implementation concerns
+* separate files for index, peer, publisher, consumer, tunnel, transport, persistence, platform, or protocol helpers
+
+Keep internal helpers `static` inside `src/librp2p.c`.
+
+Organize the implementation using clear sections, concrete functions, explicit ownership, and local static helpers rather than additional compilation units.
+
+Extend the existing files instead of creating new project source, header, or test files.
+
+Vendored KCP and Monocypher remain under `lib/`; they are external implementations and are the only intended exception to the four-file project source layout.
+
+A source-layout change is allowed only when the project owner explicitly requests that exact structural change. Do not infer permission from a request to clean up, simplify, reorganize, review, reduce complexity, or improve maintainability.
+
+If a requested change can be completed inside the existing files, it must be completed there.
 
 ## Protocol Changes
 

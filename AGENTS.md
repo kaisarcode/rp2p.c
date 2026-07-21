@@ -337,7 +337,6 @@ Relevant areas include:
 * malformed protocol input
 * timeout cleanup
 * stop behavior
-* signal handling
 * IPv4 and IPv6 behavior
 * shared library use
 

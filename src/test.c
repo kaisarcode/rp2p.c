@@ -108,8 +108,6 @@ typedef struct {
     int count;
 } test_publishers_t;
 
-static int signal_count;
-static rp2p_t *signal_ctx;
 static char test_home_path[512];
 static char test_port_reservation[512];
 static const char *test_case_name;
@@ -904,16 +902,6 @@ static int expect_string(const char *name, const char *expected, const char *act
     }
     printf("[PASS] %s\n", name);
     return 0;
-}
-
-/**
- * Records a signal callback invocation.
- * @param ctx Context passed by the library.
- * @return None.
- */
-static void test_signal_cb(rp2p_t *ctx) {
-    signal_count++;
-    signal_ctx = ctx;
 }
 
 /**
@@ -3181,87 +3169,6 @@ static int case_rp2p_list_publishers(void) {
 }
 
 /**
- * Tests rp2p_on_signal.
- * @return 0 on success, 1 on failure.
- */
-static int case_rp2p_on_signal(void) {
-    rp2p_t *ctx;
-    int rc;
-
-    rc = 0;
-    rc += expect_int("on signal NULL ctx", RP2P_ERROR,
-        rp2p_on_signal(NULL, 1, test_signal_cb));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_int("register handler", RP2P_OK,
-        rp2p_on_signal(ctx, 1, test_signal_cb));
-    rc += expect_int("remove handler", RP2P_OK, rp2p_on_signal(ctx, 1, NULL));
-    rc += expect_int("remove missing handler", RP2P_ENOENT,
-        rp2p_on_signal(ctx, 1, NULL));
-    rp2p_close(ctx);
-    return rc == 0 ? 0 : 1;
-}
-
-/**
- * Tests rp2p_raise_signal.
- * @return 0 on success, 1 on failure.
- */
-static int case_rp2p_raise_signal(void) {
-    rp2p_t *ctx;
-    int rc;
-
-    rc = 0;
-    signal_count = 0;
-    signal_ctx = NULL;
-    rc += expect_int("raise NULL ctx", 0, rp2p_raise_signal(NULL, 1));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_int("raise unhandled", 0, rp2p_raise_signal(ctx, 1));
-    rp2p_on_signal(ctx, 1, test_signal_cb);
-    rc += expect_int("raise handled", 1, rp2p_raise_signal(ctx, 1));
-    rc += expect_int("callback count", 1, signal_count);
-    rc += expect_true("callback context", signal_ctx == ctx);
-    rp2p_close(ctx);
-    return rc == 0 ? 0 : 1;
-}
-
-/**
- * Tests rp2p_listen_signals.
- * @return 0 on success, 1 on failure.
- */
-static int case_rp2p_listen_signals(void) {
-    rp2p_t *ctx;
-    int rc;
-
-    rc = 0;
-    rc += expect_int("listen signals NULL", RP2P_ERROR, rp2p_listen_signals(NULL));
-    rc += expect_int("open context", RP2P_OK, rp2p_open(&ctx));
-    rc += expect_int("listen signals context", RP2P_OK, rp2p_listen_signals(ctx));
-    rp2p_close(ctx);
-    return rc == 0 ? 0 : 1;
-}
-
-/**
- * Tests rp2p_listen_signal.
- * @return 0 on success, 1 on failure.
- */
-static int case_rp2p_listen_signal(void) {
-#ifdef _WIN32
-    return expect_int("listen signal ignored context", RP2P_OK,
-        rp2p_listen_signal(NULL, SIGINT));
-#else
-    return expect_int("listen signal ignored context", RP2P_OK,
-        rp2p_listen_signal(NULL, SIGUSR1));
-#endif
-}
-
-/**
- * Tests rp2p_signal_listener.
- * @return 0 on success, 1 on failure.
- */
-static int case_rp2p_signal_listener(void) {
-    return expect_true("listener returns NULL", rp2p_signal_listener(NULL) == NULL);
-}
-
-/**
  * Tests context-owned error detail lifetime and clearing.
  * @return 0 on success, 1 on failure.
  */
@@ -3470,11 +3377,6 @@ static int run_case(const char *name) {
     if (strcmp(name, "rp2p_tcp_stream") == 0) return case_rp2p_tcp_stream();
     if (strcmp(name, "rp2p_deregister") == 0) return case_rp2p_deregister();
     if (strcmp(name, "rp2p_list_publishers") == 0) return case_rp2p_list_publishers();
-    if (strcmp(name, "rp2p_on_signal") == 0) return case_rp2p_on_signal();
-    if (strcmp(name, "rp2p_raise_signal") == 0) return case_rp2p_raise_signal();
-    if (strcmp(name, "rp2p_listen_signals") == 0) return case_rp2p_listen_signals();
-    if (strcmp(name, "rp2p_listen_signal") == 0) return case_rp2p_listen_signal();
-    if (strcmp(name, "rp2p_signal_listener") == 0) return case_rp2p_signal_listener();
     if (strcmp(name, "rp2p_get_error") == 0) return case_rp2p_get_error();
     if (strcmp(name, "rp2p_set_seats") == 0) return case_rp2p_set_seats();
     if (strcmp(name, "rp2p_set_pow") == 0) return case_rp2p_set_pow();

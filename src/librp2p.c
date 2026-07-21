@@ -20,7 +20,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <signal.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -274,16 +273,6 @@ typedef struct {
     uint32_t next_update_ms;
 } rp2p_stream_state_t;
 
-static rp2p_t **g_signal_ctx_list = NULL;
-static int g_signal_ctx_cap = 0;
-static int g_signal_ctx_count = 0;
-#ifdef _WIN32
-static SRWLOCK g_signal_mutex = SRWLOCK_INIT;
-#else
-static pthread_mutex_t g_signal_mutex = PTHREAD_MUTEX_INITIALIZER;
-#endif
-static volatile sig_atomic_t g_signal_pending_no = 0;
-static volatile sig_atomic_t g_signal_pending = 0;
 #ifdef _WIN32
 static SRWLOCK g_key_mutex = SRWLOCK_INIT;
 #else
@@ -641,11 +630,6 @@ typedef struct {
     char pass[RP2P_PASS_MAX + 1];
 } rp2p_vip_entry_t;
 
-typedef struct {
-    int sig;
-    rp2p_signal_callback_t cb;
-} rp2p_signal_entry_t;
-
 /**
  * Pending punch.
  * Summary: Tracks a two-round punch request awaiting ACK2 from publisher.
@@ -659,9 +643,6 @@ typedef struct {
 } rp2p_pending_punch_t;
 
 struct rp2p {
-    rp2p_signal_entry_t *signal_entries;
-    int signal_count;
-    int signal_capacity;
     rp2p_peer_t *peers;
     int n_peers;
     int peers_alloc;
@@ -878,30 +859,6 @@ static void rp2p_unlock(rp2p_t *ctx) {
     LeaveCriticalSection(&ctx->mutex);
 #else
     pthread_mutex_unlock(&ctx->mutex);
-#endif
-}
-
-/**
- * Lock global signal state.
- * @return None.
- */
-static void rp2p_global_lock(void) {
-#ifdef _WIN32
-    AcquireSRWLockExclusive(&g_signal_mutex);
-#else
-    pthread_mutex_lock(&g_signal_mutex);
-#endif
-}
-
-/**
- * Unlock global signal state.
- * @return None.
- */
-static void rp2p_global_unlock(void) {
-#ifdef _WIN32
-    ReleaseSRWLockExclusive(&g_signal_mutex);
-#else
-    pthread_mutex_unlock(&g_signal_mutex);
 #endif
 }
 
@@ -1541,137 +1498,6 @@ static void rp2p_consumer_session_close(rp2p_udp_consumer_session_t *sess) {
     }
     if (sess->is_tcp) rp2p_stream_wipe(&sess->stream);
     sess->active = 0;
-}
-
-/**
- * Signal handler.
- * Summary: Async-signal-safe. Records only the pending signal number; the
- *          actual callback dispatch happens in the main loops via
- *          rp2p_dispatch_pending_signals.
- * @return None.
- */
-static void rp2p_signal_handler(int sig) {
-    g_signal_pending_no = (sig_atomic_t)sig;
-    g_signal_pending = 1;
-}
-
-/**
- * Dispatches one pending signal to all registered contexts.
- * Summary: Must be called only from non-async-signal context.
- * @return None.
- */
-static void rp2p_dispatch_pending_signals(void) {
-    int i;
-    int sig;
-    if (!g_signal_pending) return;
-    sig = (int)g_signal_pending_no;
-    g_signal_pending = 0;
-    for (i = 0; i < g_signal_ctx_count; i++) {
-        if (g_signal_ctx_list[i])
-            rp2p_raise_signal(g_signal_ctx_list[i], sig);
-    }
-}
-
-/**
- * On signal.
- * @return 0 on success, -1 on error.
- */
-int rp2p_on_signal(
-    rp2p_t *ctx,
-    int sig,
-    rp2p_signal_callback_t cb)
-{
-    rp2p_signal_entry_t *new_entries;
-    int i;
-
-    if (!ctx) return RP2P_ERROR;
-
-    if (!cb) {
-        for (i = 0; i < ctx->signal_count; i++) {
-            if (ctx->signal_entries[i].sig == sig) {
-                ctx->signal_entries[i] =
-                    ctx->signal_entries[ctx->signal_count - 1];
-                ctx->signal_count--;
-                return RP2P_OK;
-            }
-        }
-        return RP2P_ENOENT;
-    }
-
-    if (ctx->signal_count >= ctx->signal_capacity) {
-        int new_cap = ctx->signal_capacity
-                    ? ctx->signal_capacity * 2
-                    : 4;
-        new_entries = (rp2p_signal_entry_t *)realloc(
-            ctx->signal_entries,
-            (size_t)new_cap * sizeof(rp2p_signal_entry_t));
-        if (!new_entries) return RP2P_ERROR;
-        ctx->signal_entries = new_entries;
-        ctx->signal_capacity = new_cap;
-    }
-
-    ctx->signal_entries[ctx->signal_count].sig = sig;
-    ctx->signal_entries[ctx->signal_count].cb = cb;
-    ctx->signal_count++;
-    return RP2P_OK;
-}
-
-/**
- * Raise signal.
- * @return 0 on success, -1 on error.
- */
-int rp2p_raise_signal(rp2p_t *ctx, int sig) {
-    int i;
-    int count = 0;
-    if (!ctx) return 0;
-    for (i = 0; i < ctx->signal_count; i++) {
-        if (ctx->signal_entries[i].sig == sig) {
-            ctx->signal_entries[i].cb(ctx);
-            count++;
-        }
-    }
-    return count;
-}
-
-/**
- * Listen signals.
- * @return 0 on success, -1 on error.
- */
-int rp2p_listen_signals(rp2p_t *ctx) {
-    rp2p_t **new_list;
-    if (!ctx) return RP2P_ERROR;
-    rp2p_global_lock();
-    if (g_signal_ctx_count >= g_signal_ctx_cap) {
-        int new_cap = g_signal_ctx_cap ? g_signal_ctx_cap * 2 : 4;
-        new_list = (rp2p_t **)realloc(
-            g_signal_ctx_list,
-            (size_t)new_cap * sizeof(rp2p_t *));
-        if (!new_list) { rp2p_global_unlock(); return RP2P_ERROR; }
-        g_signal_ctx_list = new_list;
-        g_signal_ctx_cap = new_cap;
-    }
-    g_signal_ctx_list[g_signal_ctx_count++] = ctx;
-    rp2p_global_unlock();
-    return RP2P_OK;
-}
-
-/**
- * Listen signal.
- * @return 0 on success, -1 on error.
- */
-int rp2p_listen_signal(rp2p_t *ctx, int sig_id) {
-    (void)ctx;
-    signal(sig_id, rp2p_signal_handler);
-    return RP2P_OK;
-}
-
-/**
- * Signal listener thread entry point.
- * @return NULL.
- */
-void *rp2p_signal_listener(void *arg) {
-    (void)arg;
-    return NULL;
 }
 
 #ifdef _WIN32
@@ -2538,9 +2364,6 @@ int rp2p_open(rp2p_t **out) {
     ctx->peers_alloc = RP2P_MAX_PEERS;
     ctx->n_peers_cap = RP2P_MAX_PEERS;
     ctx->nonvip_cap = RP2P_MAX_PEERS;
-    ctx->signal_entries = NULL;
-    ctx->signal_count = 0;
-    ctx->signal_capacity = 0;
     ctx->pass[0] = '\0';
     ctx->pow_bits = 0;
     ctx->bind_port = 0;
@@ -2571,15 +2394,6 @@ int rp2p_open(rp2p_t **out) {
 int rp2p_close(rp2p_t *ctx) {
     int i;
     if (!ctx) return RP2P_ERROR;
-    rp2p_global_lock();
-    for (i = 0; i < g_signal_ctx_count; i++) {
-        if (g_signal_ctx_list[i] == ctx) {
-            g_signal_ctx_list[i] =
-                g_signal_ctx_list[--g_signal_ctx_count];
-            break;
-        }
-    }
-    rp2p_global_unlock();
     for (i = 0; i < ctx->n_conns; i++)
         RP2P_FD_CLOSE(ctx->conns[i].fd);
     if (ctx->conns)
@@ -2588,7 +2402,6 @@ int rp2p_close(rp2p_t *ctx) {
     if (ctx->vips)
         crypto_wipe(ctx->vips, (size_t)ctx->vips_cap * sizeof(*ctx->vips));
     free(ctx->vips);
-    free(ctx->signal_entries);
     if (ctx->peers)
         crypto_wipe(ctx->peers, (size_t)ctx->peers_alloc * sizeof(*ctx->peers));
     free(ctx->peers);
@@ -5420,7 +5233,6 @@ static int rp2p_index_event_loop(rp2p_index_runtime_t *runtime) {
     int result;
 
     for (;;) {
-        rp2p_dispatch_pending_signals();
         if (runtime->ctx->stop_requested) {
             fprintf(stderr, "rp2p: shutdown requested\n");
             break;
@@ -7157,7 +6969,6 @@ rp2p_publisher_runtime_t *runtime)
     rp2p_set_nonblock(runtime->owned_control_fd);
     rp2p_set_nonblock(runtime->owned_udp_fd);
     while (!runtime->borrowed_ctx->stop_requested) {
-        rp2p_dispatch_pending_signals();
         stage_result = rp2p_publisher_build_fdset(runtime, &read_fds, &max_fd);
         if (stage_result < 0) {
             result = stage_result;
@@ -8184,7 +7995,6 @@ static int rp2p_consumer_loop(rp2p_consumer_runtime_t *runtime) {
         int selected;
         uint32_t wait_ms;
 
-        rp2p_dispatch_pending_signals();
         fdset_result = rp2p_consumer_fdset_build(runtime, &fds, &maxfd);
         if (fdset_result < 0) {
             result = RP2P_ENET;

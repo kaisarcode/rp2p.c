@@ -16,7 +16,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <signal.h>
 #include <time.h>
 #include <errno.h>
 
@@ -27,16 +26,6 @@
 #  include <unistd.h>
 #include <sys/stat.h>
 #endif
-
-/**
- * Signal callback for graceful shutdown.
- * Summary: Requests graceful stop on the current context.
- * @param ctx Open context.
- * @return None.
- */
-static void rp2p_signal_cb(rp2p_t *ctx) {
-    rp2p_stop(ctx);
-}
 
 /**
  * Parses one bounded ASCII decimal integer.
@@ -330,12 +319,6 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        rp2p_on_signal(ctx, SIGINT, rp2p_signal_cb);
-        rp2p_on_signal(ctx, SIGTERM, rp2p_signal_cb);
-        rp2p_listen_signals(ctx);
-        rp2p_listen_signal(ctx, SIGINT);
-        rp2p_listen_signal(ctx, SIGTERM);
-
         ret = rp2p_serve_index(ctx, NULL, port);
         fprintf(stderr, "rp2p: index exited: %s\n", rp2p_strerror(ret));
         exit_code = ret == RP2P_OK ? 0 : 1;
@@ -416,12 +399,6 @@ int main(int argc, char **argv) {
         rp2p_set_stun_url(ctx, opts.stun_url[0] ? opts.stun_url : NULL);
 
         fprintf(stderr, "rp2p: waiting for connections...\n");
-
-        rp2p_on_signal(ctx, SIGINT, rp2p_signal_cb);
-        rp2p_on_signal(ctx, SIGTERM, rp2p_signal_cb);
-        rp2p_listen_signals(ctx);
-        rp2p_listen_signal(ctx, SIGINT);
-        rp2p_listen_signal(ctx, SIGTERM);
 
         ret = rp2p_wait(ctx, idx_host, idx_port, host, 0);
         if (ret != RP2P_OK)
@@ -523,12 +500,6 @@ int main(int argc, char **argv) {
         rp2p_set_port(ctx, listen_port);
         rp2p_set_sweep(ctx, opts.sweep);
         rp2p_set_stun_url(ctx, opts.stun_url[0] ? opts.stun_url : NULL);
-
-        rp2p_on_signal(ctx, SIGINT, rp2p_signal_cb);
-        rp2p_on_signal(ctx, SIGTERM, rp2p_signal_cb);
-        rp2p_listen_signals(ctx);
-        rp2p_listen_signal(ctx, SIGINT);
-        rp2p_listen_signal(ctx, SIGTERM);
 
         ret = rp2p_connect(ctx, idx_host, idx_port, self_id, host, 0);
         if (ret != RP2P_OK)

@@ -92,8 +92,6 @@ typedef struct {
     unsigned int priority;
 } rp2p_candidate_t;
 
-typedef void (*rp2p_signal_callback_t)(rp2p_t *ctx);
-
 /**
  * Publisher listing callback.
  * @param id Publisher identifier registered in the index.
@@ -257,46 +255,6 @@ unsigned short index_port,
 rp2p_publisher_cb cb,
 void *userdata
 );
-
-/**
- * Adds or removes one context-local signal callback.
- * @return RP2P_OK on success or a negative error category.
- */
-int rp2p_on_signal(
-rp2p_t *ctx,
-int sig,
-rp2p_signal_callback_t cb
-);
-
-/**
- * Dispatches one signal to matching context-local callbacks.
- * @return Number of callbacks invoked.
- */
-int rp2p_raise_signal(
-rp2p_t *ctx,
-int sig
-);
-
-/**
- * Registers one context for deferred process-signal dispatch.
- * @return RP2P_OK on success or a negative error category.
- */
-int rp2p_listen_signals(rp2p_t *ctx);
-
-/**
- * Installs the async-signal-safe handler for one signal number.
- * @return RP2P_OK on success or a negative error category.
- */
-int rp2p_listen_signal(
-rp2p_t *ctx,
-int sig
-);
-
-/**
- * Provides the legacy signal-listener thread entry point.
- * @return NULL.
- */
-void *rp2p_signal_listener(void *arg);
 
 /**
  * Sets the index publisher capacity.
